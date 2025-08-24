@@ -528,9 +528,8 @@ class GasScraper:
             rows = table.find_elements(By.TAG_NAME, "tr")
             
             current_price = None
-            yesterday_price = None
             
-            # Extract data from each row
+            # Extract data from each row - only look for Current Avg.
             for row in rows:
                 cells = row.find_elements(By.TAG_NAME, "td")
                 if len(cells) >= 2:
@@ -540,45 +539,26 @@ class GasScraper:
                     if "Current Avg." in period:
                         current_price = regular_price.replace('$', '').strip()
                         print(f"   ✅ Current Avg.: ${current_price}")
-                    elif "Yesterday Avg." in period:
-                        yesterday_price = regular_price.replace('$', '').strip()
-                        print(f"   ✅ Yesterday Avg.: ${yesterday_price}")
+                        break  # Only get the first Current Avg. row
             
-            if current_price and yesterday_price:
-                # Save both current and yesterday prices
-                results = []
-                
-                # Current price
+            if current_price:
+                # Save only the current price
                 try:
                     current_float = float(current_price)
-                    results.append({
+                    result = {
                         'price': current_float,
                         'timestamp': f"Current as of {datetime.now().strftime('%Y-%m-%d')}",
                         'region': 'United States',
                         'source': 'aaa_gas_prices',
                         'fuel_type': 'regular'
-                    })
+                    }
                     print(f"   🎯 Current price: ${current_float}")
+                    return result
                 except ValueError:
                     print(f"   ❌ Could not convert current price '{current_price}' to float")
-                
-                # Yesterday price
-                try:
-                    yesterday_float = float(yesterday_price)
-                    results.append({
-                        'price': yesterday_float,
-                        'timestamp': f"Yesterday as of {datetime.now().strftime('%Y-%m-%d')}",
-                        'region': 'United States',
-                        'source': 'aaa_gas_prices',
-                        'fuel_type': 'regular'
-                    })
-                    print(f"   🎯 Yesterday price: ${yesterday_float}")
-                except ValueError:
-                    print(f"   ❌ Could not convert yesterday price '{yesterday_price}' to float")
-                
-                return results if results else None
+                    return None
             else:
-                print("   ❌ Could not find current or yesterday prices")
+                print("   ❌ Could not find current price")
                 return None
                 
         except Exception as e:
@@ -595,9 +575,8 @@ class GasScraper:
             rows = table.find_elements(By.TAG_NAME, "tr")
             
             current_price = None
-            yesterday_price = None
             
-            # Extract data from each row
+            # Extract data from each row - only look for Current Avg.
             for row in rows:
                 cells = row.find_elements(By.TAG_NAME, "td")
                 if len(cells) >= 2:
@@ -607,45 +586,26 @@ class GasScraper:
                     if "Current Avg." in period:
                         current_price = regular_price.replace('$', '').strip()
                         print(f"   ✅ Current Avg.: ${current_price}")
-                    elif "Yesterday Avg." in period:
-                        yesterday_price = regular_price.replace('$', '').strip()
-                        print(f"   ✅ Yesterday Avg.: ${yesterday_price}")
+                        break  # Only get the first Current Avg. row
             
-            if current_price and yesterday_price:
-                # Save both current and yesterday prices
-                results = []
-                
-                # Current price
+            if current_price:
+                # Save only the current price
                 try:
                     current_float = float(current_price)
-                    results.append({
+                    result = {
                         'price': current_float,
                         'timestamp': f"Current as of {datetime.now().strftime('%Y-%m-%d')}",
                         'region': 'United States',
                         'source': 'aaa_gas_prices',
                         'fuel_type': 'regular'
-                    })
+                    }
                     print(f"   🎯 Current price: ${current_float}")
+                    return result
                 except ValueError:
                     print(f"   ❌ Could not convert current price '{current_price}' to float")
-                
-                # Yesterday price
-                try:
-                    yesterday_float = float(yesterday_price)
-                    results.append({
-                        'price': yesterday_float,
-                        'timestamp': f"Yesterday as of {datetime.now().strftime('%Y-%m-%d')}",
-                        'region': 'United States',
-                        'source': 'aaa_gas_prices',
-                        'fuel_type': 'regular'
-                    })
-                    print(f"   🎯 Yesterday price: ${yesterday_float}")
-                except ValueError:
-                    print(f"   ❌ Could not convert yesterday price '{yesterday_price}' to float")
-                
-                return results if results else None
+                    return None
             else:
-                print("   ❌ Could not find current or yesterday prices")
+                print("   ❌ Could not find current price")
                 return None
                 
         except Exception as e:
@@ -1135,7 +1095,7 @@ class GasScraper:
         aaa_data = self.scrape_aaa()
         if aaa_data:
             self.save_to_database(aaa_data)
-            print(f"🎯 AAA: Extracted {len(aaa_data)} price records")
+            print(f"🎯 AAA: Extracted current price: ${aaa_data['price']}")
         else:
             print("❌ Failed to scrape AAA data")
     
@@ -1285,7 +1245,7 @@ class GasScraper:
                     aaa_df = pd.DataFrame(aaa_data, 
                                         columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
                     aaa_df.to_excel(writer, sheet_name='AAA', index=False)
-                    print(f"   ✅ AAA: {len(aaa_data)} records")
+                    print(f"   ✅ AAA: {len(aaa_data)} record")
                 else:
                     empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
                     empty_df.to_excel(writer, sheet_name='AAA', index=False)
@@ -1434,7 +1394,7 @@ class GasScraper:
                     aaa_df = pd.DataFrame(aaa_data, 
                                         columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
                     aaa_df.to_excel(writer, sheet_name='AAA', index=False)
-                    print(f"   ✅ AAA: {len(aaa_data)} records")
+                    print(f"   ✅ AAA: {len(aaa_data)} record")
                 else:
                     empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
                     empty_df.to_excel(writer, sheet_name='AAA', index=False)
@@ -1496,7 +1456,7 @@ class GasScraper:
         print("🚗 Hexa Source Gas Scraper - Scheduled Mode")
         print("=" * 50)
         print("📅 Schedule:")
-        print("   • GasBuddy: Every 10 minutes")
+        print("   • GasBuddy: Every 15 minutes")
         print("   • AAA: Daily at 12:01 AM Pacific")
         print("   • RBOB & WTI: Every 2 hours (Mon 1AM EST - Fri 11PM EST)")
         print("   • EIA Data (Gasoline Stocks & Refinery Runs): Daily at 11 AM EST")
@@ -1504,8 +1464,8 @@ class GasScraper:
         print("   • Monthly Excel Export: 1st of month at 5 PM EST")
         print("=" * 50)
         
-        # Schedule GasBuddy every 10 minutes
-        schedule.every(10).minutes.do(self.run_gasbuddy_job)
+        # Schedule GasBuddy every 15 minutes
+        schedule.every(15).minutes.do(self.run_gasbuddy_job)
         
         # Schedule AAA daily at 12:01 AM Pacific (3:01 AM Eastern)
         schedule.every().day.at("03:01").do(self.run_aaa_job)

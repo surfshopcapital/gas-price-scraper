@@ -74,22 +74,36 @@ st.markdown("""
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         margin-bottom: 1rem;
     }
+    .data-export {
+        background: #f3e5f5;
+        border-radius: 0.8rem;
+        padding: 1.5rem;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        border-left: 4px solid #9c27b0;
+    }
+    .summary-stats {
+        background: #e8f5e8;
+        border-radius: 0.8rem;
+        padding: 1.5rem;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        border-left: 4px solid #4caf50;
+    }
     .stApp {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: #f8f9fa;
     }
     .main .block-container {
-        background: rgba(255, 255, 255, 0.95);
+        background: #ffffff;
         border-radius: 1rem;
         padding: 2rem;
         margin: 1rem;
         box-shadow: 0 8px 32px rgba(0,0,0,0.1);
-        backdrop-filter: blur(10px);
     }
     .update-schedule {
-        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        background: #e3f2fd;
         border-radius: 0.8rem;
         padding: 1.5rem;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        border-left: 4px solid #2196f3;
     }
     .update-schedule h3 {
         color: #2c3e50;
@@ -251,7 +265,7 @@ def load_data():
         conn = duckdb.connect('gas_prices.duckdb')
         
         # Get latest data for each source
-        # Special handling for AAA to get "Current" instead of "Yesterday"
+        # Special handling for AAA to get "Current" data only
         latest_data = conn.execute('''
             SELECT 
                 source,
@@ -282,7 +296,7 @@ def load_data():
                 surprise,
                 scraped_at
             FROM gas_prices p1
-            WHERE (source != 'aaa_gas_prices' AND scraped_at = (
+            WHERE scraped_at = (
                 SELECT MAX(scraped_at) 
                 FROM gas_prices p2 
                 WHERE p2.source = p1.source 
@@ -291,8 +305,7 @@ def load_data():
                     FROM gas_prices p3 
                     WHERE p3.source = p1.source
                 )
-            ))
-            OR (source = 'aaa_gas_prices' AND timestamp LIKE '%Yesterday%')
+            )
         ''').fetchdf()
         
         # Get historical data for charts
@@ -321,8 +334,8 @@ def get_next_update_info():
     """Get information about next scheduled updates"""
     now = datetime.now()
     
-    # GasBuddy: every 10 minutes
-    next_gasbuddy = now + timedelta(minutes=10 - (now.minute % 10))
+    # GasBuddy: every 15 minutes
+    next_gasbuddy = now + timedelta(minutes=15 - (now.minute % 15))
     next_gasbuddy = next_gasbuddy.replace(second=0, microsecond=0)
     
     # AAA: daily at 12:01 AM Pacific (3:01 AM UTC)
@@ -556,6 +569,7 @@ def main():
     
     # Data Export Section
     st.markdown("---")
+    st.markdown('<div class="data-export">', unsafe_allow_html=True)
     st.subheader("Data Export")
     
     # Create two columns for export buttons
@@ -602,8 +616,11 @@ def main():
             except Exception as e:
                 st.error(f"Error exporting Excel: {e}")
     
+    st.markdown('</div>', unsafe_allow_html=True)
+    
     # Summary metrics
     st.markdown("---")
+    st.markdown('<div class="summary-stats">', unsafe_allow_html=True)
     st.subheader("Summary Statistics")
     
     col1, col2, col3, col4 = st.columns(4)
@@ -626,6 +643,8 @@ def main():
                 st.metric("Last Update", last_update.strftime('%H:%M'))
         except Exception as e:
             st.metric("Last Update", "Error")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
     
     # Footer
     st.markdown("---")
