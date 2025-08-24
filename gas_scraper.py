@@ -10,7 +10,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium import webdriver
 import random
-import duckdb
+import psycopg2
 import os
 import pandas as pd
 
@@ -1040,7 +1040,7 @@ class GasScraper:
             return None
     
     def save_to_database(self, gas_data_list):
-        """Save gas price data to DuckDB"""
+        """Save gas price data to PostgreSQL"""
         if not gas_data_list:
             return False
         
@@ -1049,7 +1049,10 @@ class GasScraper:
             gas_data_list = [gas_data_list]
             
         try:
-            conn = duckdb.connect(self.db_path)
+            # Get database connection from environment variables
+            database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:QKmnqfjnamSWVXIgeEZZctczGSYOZiKw@switchback.proxy.rlwy.net:51447/railway')
+            conn = psycopg2.connect(database_url)
+            cursor = conn.cursor()
             
             saved_count = 0
             for gas_data in gas_data_list:
@@ -1057,17 +1060,19 @@ class GasScraper:
                 consensus = gas_data.get('consensus', None)
                 surprise = gas_data.get('surprise', None)
                 
-                # Insert the data with auto-incrementing ID using sequence
-                conn.execute('''
-                    INSERT INTO gas_prices (id, price, timestamp, region, source, fuel_type, consensus, surprise)
-                    VALUES (nextval('gas_prices_id_seq'), ?, ?, ?, ?, ?, ?, ?)
-                ''', [gas_data['price'], gas_data['timestamp'], gas_data['region'], gas_data['source'], gas_data['fuel_type'], consensus, surprise])
+                # Insert the data with auto-incrementing ID (PostgreSQL uses SERIAL)
+                cursor.execute('''
+                    INSERT INTO gas_prices (price, timestamp, region, source, fuel_type, consensus, surprise)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ''', (gas_data['price'], gas_data['timestamp'], gas_data['region'], gas_data['source'], gas_data['fuel_type'], consensus, surprise))
                 
                 saved_count += 1
                 print(f"   ✅ Saved: ${gas_data['price']} from {gas_data['source']}")
                 if consensus is not None and surprise is not None:
                     print(f"      📊 Consensus: {consensus}M, Surprise: {surprise}M")
             
+            conn.commit()
+            cursor.close()
             conn.close()
             
             print(f"✅ Successfully saved {saved_count} records to database")
@@ -1171,56 +1176,57 @@ class GasScraper:
             today = datetime.now().date()
             
             # Connect to database
-            conn = duckdb.connect(self.db_path)
+            database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:QKmnqfjnamSWVXIgeEZZctczGSYOZiKw@switchback.proxy.rlwy.net:51447/railway')
+            conn = psycopg2.connect(database_url)
             
             # Get data for each source for today
             gasbuddy_data = conn.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'gasbuddy_fuel_insights'
-                AND DATE(scraped_at) = ?
+                AND DATE(scraped_at) = %s
                 ORDER BY scraped_at DESC
-            ''', [today]).fetchall()
+            ''', (today,)).fetchall()
             
             aaa_data = conn.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'aaa_gas_prices'
-                AND DATE(scraped_at) = ?
+                AND DATE(scraped_at) = %s
                 ORDER BY scraped_at DESC
-            ''', [today]).fetchall()
+            ''', (today,)).fetchall()
             
             rbob_data = conn.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'marketwatch_rbob_futures'
-                AND DATE(scraped_at) = ?
+                AND DATE(scraped_at) = %s
                 ORDER BY scraped_at DESC
-            ''', [today]).fetchall()
+            ''', (today,)).fetchall()
             
             wti_data = conn.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'marketwatch_wti_futures'
-                AND DATE(scraped_at) = ?
+                AND DATE(scraped_at) = %s
                 ORDER BY scraped_at DESC
-            ''', [today]).fetchall()
+            ''', (today,)).fetchall()
             
             gasoline_stocks_data = conn.execute('''
                 SELECT price, timestamp, region, source, fuel_type, consensus, surprise, scraped_at
                 FROM gas_prices
                 WHERE source = 'tradingeconomics_gasoline_stocks'
-                AND DATE(scraped_at) = ?
+                AND DATE(scraped_at) = %s
                 ORDER BY scraped_at DESC
-            ''', [today]).fetchall()
+            ''', (today,)).fetchall()
             
             refinery_runs_data = conn.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'tradingeconomics_refinery_runs'
-                AND DATE(scraped_at) = ?
+                AND DATE(scraped_at) = %s
                 ORDER BY scraped_at DESC
-            ''', [today]).fetchall()
+            ''', (today,)).fetchall()
             
             conn.close()
             
@@ -1321,56 +1327,57 @@ class GasScraper:
             current_month = now.replace(day=1).date()
             
             # Connect to database
-            conn = duckdb.connect(self.db_path)
+            database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:QKmnqfjnamSWVXIgeEZZctczGSYOZiKw@switchback.proxy.rlwy.net:51447/railway')
+            conn = psycopg2.connect(database_url)
             
             # Get data for each source for current month
             gasbuddy_data = conn.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'gasbuddy_fuel_insights'
-                AND DATE(scraped_at) >= ?
+                AND DATE(scraped_at) >= %s
                 ORDER BY scraped_at DESC
-            ''', [current_month]).fetchall()
+            ''', (current_month,)).fetchall()
             
             aaa_data = conn.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'aaa_gas_prices'
-                AND DATE(scraped_at) >= ?
+                AND DATE(scraped_at) >= %s
                 ORDER BY scraped_at DESC
-            ''', [current_month]).fetchall()
+            ''', (current_month,)).fetchall()
             
             rbob_data = conn.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'marketwatch_rbob_futures'
-                AND DATE(scraped_at) >= ?
+                AND DATE(scraped_at) >= %s
                 ORDER BY scraped_at DESC
-            ''', [current_month]).fetchall()
+            ''', (current_month,)).fetchall()
             
             wti_data = conn.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'marketwatch_wti_futures'
-                AND DATE(scraped_at) >= ?
+                AND DATE(scraped_at) >= %s
                 ORDER BY scraped_at DESC
-            ''', [current_month]).fetchall()
+            ''', (current_month,)).fetchall()
             
             gasoline_stocks_data = conn.execute('''
                 SELECT price, timestamp, region, source, fuel_type, consensus, surprise, scraped_at
                 FROM gas_prices
                 WHERE source = 'tradingeconomics_gasoline_stocks'
-                AND DATE(scraped_at) >= ?
+                AND DATE(scraped_at) >= %s
                 ORDER BY scraped_at DESC
-            ''', [current_month]).fetchall()
+            ''', (current_month,)).fetchall()
             
             refinery_runs_data = conn.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'tradingeconomics_refinery_runs'
-                AND DATE(scraped_at) >= ?
+                AND DATE(scraped_at) >= %s
                 ORDER BY scraped_at DESC
-            ''', [current_month]).fetchall()
+            ''', (current_month,)).fetchall()
             
             conn.close()
             
