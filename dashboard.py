@@ -28,6 +28,10 @@ st.markdown("""
         padding: 1rem;
         border-radius: 0.5rem;
         border-left: 4px solid #1f77b4;
+        height: 200px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
     }
     .data-source {
         background-color: #ffffff;
@@ -87,8 +91,41 @@ def load_data():
         st.error(f"Error loading data: {e}")
         return None, None
 
+def get_next_update_info():
+    """Get information about next scheduled updates"""
+    now = datetime.now()
+    
+    # GasBuddy: every 10 minutes
+    next_gasbuddy = now + timedelta(minutes=10 - (now.minute % 10))
+    next_gasbuddy = next_gasbuddy.replace(second=0, microsecond=0)
+    
+    # AAA: daily at 12:01 AM Pacific (3:01 AM UTC)
+    next_aaa = now.replace(hour=3, minute=1, second=0, microsecond=0)
+    if next_aaa <= now:
+        next_aaa += timedelta(days=1)
+    
+    # RBOB & WTI: every 2 hours Mon-Fri during market hours
+    if now.weekday() < 5:  # Monday to Friday
+        next_rbob_wti = now.replace(minute=0, second=0, microsecond=0)
+        if next_rbob_wti <= now:
+            next_rbob_wti += timedelta(hours=2)
+    else:
+        next_rbob_wti = "Weekend - No updates"
+    
+    # Gasoline Stocks & Refinery Runs: daily at 10:35 AM EST (15:35 UTC)
+    next_eia = now.replace(hour=15, minute=35, second=0, microsecond=0)
+    if next_eia <= now:
+        next_eia += timedelta(days=1)
+    
+    return {
+        'gasbuddy': next_gasbuddy,
+        'aaa': next_aaa,
+        'rbob_wti': next_rbob_wti,
+        'eia': next_eia
+    }
+
 def main():
-    st.markdown('<h1 class="main-header">⛽ Gas Price Dashboard</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">Gas Price Dashboard</h1>', unsafe_allow_html=True)
     
     # Load data
     latest_data, historical_data = load_data()
@@ -98,7 +135,7 @@ def main():
         return
     
     # Sidebar filters
-    st.sidebar.header("📊 Dashboard Controls")
+    st.sidebar.header("Dashboard Controls")
     
     # Time range filter
     time_range = st.sidebar.selectbox(
@@ -107,26 +144,83 @@ def main():
         index=1
     )
     
-    # Latest data overview - 6 clean cards
-    st.header("📊 Latest Data Overview")
+    # Latest data overview - 6 cards in single row
+    st.header("Latest Data Overview")
     
-    # Create 6 clean metric cards in 2 rows of 3
-    row1_cols = st.columns(3)
-    row2_cols = st.columns(3)
+    # Create 6 equal-width columns for all sources
+    cols = st.columns(6)
     
-    # First row: GasBuddy, AAA, RBOB
-    sources_row1 = ['gasbuddy_fuel_insights', 'aaa_gas_prices', 'marketwatch_rbob_futures']
-    for idx, source in enumerate(sources_row1):
-        source_data = latest_data[latest_data['source'] == source]
+    # Define source mappings with new names and data sources
+    source_configs = [
+        {
+            'source': 'gasbuddy_fuel_insights',
+            'name': 'GasBuddy National Average (Live Feed)',
+            'value_field': 'price',
+            'display_name': 'GasBuddy'
+        },
+        {
+            'source': 'aaa_gas_prices',
+            'name': 'AAA Gas National Average (Current)',
+            'value_field': 'price',
+            'display_name': 'AAA'
+        },
+        {
+            'source': 'marketwatch_rbob_futures',
+            'name': 'RBOB Futures',
+            'value_field': 'price',
+            'display_name': 'RBOB'
+        },
+        {
+            'source': 'marketwatch_wti_futures',
+            'name': 'WTI Futures',
+            'value_field': 'price',
+            'display_name': 'WTI'
+        },
+        {
+            'source': 'tradingeconomics_gasoline_stocks',
+            'name': 'Gasoline Stocks Change',
+            'value_field': 'surprise',  # Use surprise instead of price
+            'display_name': 'Gasoline Stocks'
+        },
+        {
+            'source': 'tradingeconomics_refinery_runs',
+            'name': 'Refinery Runs Change',
+            'value_field': 'price',
+            'display_name': 'Refinery Runs'
+        }
+    ]
+    
+    # Display each card
+    for idx, config in enumerate(source_configs):
+        source_data = latest_data[latest_data['source'] == config['source']]
         if not source_data.empty:
             row = source_data.iloc[0]
-            with row1_cols[idx]:
+            with cols[idx]:
                 try:
                     updated_time = row['scraped_at'].strftime('%H:%M') if not pd.isna(row['scraped_at']) else "N/A"
+                    
+                    # Get the appropriate value based on config
+                    if config['value_field'] == 'surprise' and 'surprise' in row and not pd.isna(row['surprise']):
+                        value = row['surprise']
+                        value_label = "Surprise"
+                    else:
+                        value = row['price']
+                        value_label = "Value"
+                    
+                    # Format the value display
+                    if config['source'] == 'tradingeconomics_gasoline_stocks':
+                        value_display = f"{value:.3f}M"
+                    elif config['source'] == 'tradingeconomics_refinery_runs':
+                        value_display = f"{value:.3f}M"
+                    elif config['source'] in ['marketwatch_wti_futures']:
+                        value_display = f"${value:.2f}"
+                    else:
+                        value_display = f"${value:.3f}"
+                    
                     st.markdown(f"""
                     <div class="metric-card">
-                        <h4>{source.replace('_', ' ').title()}</h4>
-                        <p><strong>Price:</strong> ${row['price']:.3f}</p>
+                        <h4>{config['name']}</h4>
+                        <p><strong>{value_label}:</strong> {value_display}</p>
                         <p><strong>Date:</strong> {row['timestamp']}</p>
                         <p><strong>Updated:</strong> {updated_time}</p>
                     </div>
@@ -134,45 +228,51 @@ def main():
                 except Exception as e:
                     st.markdown(f"""
                     <div class="metric-card">
-                        <h4>{source.replace('_', ' ').title()}</h4>
-                        <p><strong>Price:</strong> ${row['price']:.3f}</p>
-                        <p><strong>Date:</strong> {row['timestamp']}</p>
+                        <h4>{config['name']}</h4>
+                        <p><strong>Value:</strong> Error</p>
+                        <p><strong>Date:</strong> Error</p>
                         <p><strong>Updated:</strong> Error</p>
                     </div>
                     """, unsafe_allow_html=True)
+        else:
+            with cols[idx]:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h4>{config['name']}</h4>
+                    <p><strong>Value:</strong> No data</p>
+                    <p><strong>Date:</strong> No data</p>
+                    <p><strong>Updated:</strong> No data</p>
+                </div>
+                """, unsafe_allow_html=True)
     
-    # Second row: WTI, Gasoline Stocks, Refinery Runs
-    sources_row2 = ['marketwatch_wti_futures', 'tradingeconomics_gasoline_stocks', 'tradingeconomics_refinery_runs']
-    for idx, source in enumerate(sources_row2):
-        source_data = latest_data[latest_data['source'] == source]
-        if not source_data.empty:
-            row = source_data.iloc[0]
-            with row2_cols[idx]:
-                try:
-                    updated_time = row['scraped_at'].strftime('%H:%M') if not pd.isna(row['scraped_at']) else "N/A"
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <h4>{source.replace('_', ' ').title()}</h4>
-                        <p><strong>Price:</strong> ${row['price']:.3f}</p>
-                        <p><strong>Date:</strong> {row['timestamp']}</p>
-                        <p><strong>Updated:</strong> {updated_time}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                except Exception as e:
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <h4>{source.replace('_', ' ').title()}</h4>
-                        <p><strong>Price:</strong> ${row['price']:.3f}</p>
-                        <p><strong>Date:</strong> {row['timestamp']}</p>
-                        <p><strong>Updated:</strong> Error</p>
-                    </div>
-                    """, unsafe_allow_html=True)
+    # Next Update Information
+    st.markdown("---")
+    st.subheader("Next Update Schedule")
+    
+    next_updates = get_next_update_info()
+    
+    update_cols = st.columns(4)
+    
+    with update_cols[0]:
+        st.metric("GasBuddy", f"Every 10 min\nNext: {next_updates['gasbuddy'].strftime('%H:%M') if isinstance(next_updates['gasbuddy'], datetime) else next_updates['gasbuddy']}")
+    
+    with update_cols[1]:
+        st.metric("AAA", f"Daily 12:01 AM PT\nNext: {next_updates['aaa'].strftime('%m/%d %H:%M') if isinstance(next_updates['aaa'], datetime) else next_updates['aaa']}")
+    
+    with update_cols[2]:
+        if isinstance(next_updates['rbob_wti'], datetime):
+            st.metric("RBOB & WTI", f"Every 2h Mon-Fri\nNext: {next_updates['rbob_wti'].strftime('%H:%M')}")
+        else:
+            st.metric("RBOB & WTI", next_updates['rbob_wti'])
+    
+    with update_cols[3]:
+        st.metric("EIA Data", f"Daily 10:35 AM EST\nNext: {next_updates['eia'].strftime('%m/%d %H:%M') if isinstance(next_updates['eia'], datetime) else next_updates['eia']}")
     
     # Download CSV button for full database
     st.markdown("---")
-    st.subheader("📥 Download Data")
+    st.subheader("Download Data")
     
-    if st.button("📊 Download Full Database as CSV"):
+    if st.button("Download Full Database as CSV"):
         try:
             conn = duckdb.connect('gas_prices.duckdb')
             all_data = conn.execute('''
@@ -184,7 +284,7 @@ def main():
             
             csv = all_data.to_csv(index=False)
             st.download_button(
-                label="💾 Download CSV",
+                label="Download CSV",
                 data=csv,
                 file_name=f"gas_prices_database_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv"
@@ -194,7 +294,7 @@ def main():
     
     # Summary metrics
     st.markdown("---")
-    st.subheader("📈 Summary Statistics")
+    st.subheader("Summary Statistics")
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -216,48 +316,6 @@ def main():
                 st.metric("Last Update", last_update.strftime('%H:%M'))
         except Exception as e:
             st.metric("Last Update", "Error")
-    
-    # GasBuddy Chart (most frequent updates)
-    st.header("📈 GasBuddy Price Trend")
-    gasbuddy_data = historical_data[historical_data['source'] == 'gasbuddy_fuel_insights']
-    if not gasbuddy_data.empty:
-        fig = px.line(gasbuddy_data, x='scraped_at', y='price', 
-                     title='GasBuddy Fuel Insights - Price Trend Over Time', 
-                     markers=True,
-                     labels={'price': 'Price ($)', 'scraped_at': 'Time'})
-        fig.update_layout(
-            xaxis_title="Time",
-            yaxis_title="Price ($)",
-            hovermode='x unified'
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No GasBuddy data available for charting")
-    
-    # All Sources Overview
-    st.header("📊 All Sources Data")
-    
-    # Show data for all sources
-    for source in latest_data['source'].unique():
-        source_data = historical_data[historical_data['source'] == source]
-        if not source_data.empty:
-            st.subheader(f"{source.replace('_', ' ').title()}")
-            
-            # Show data table
-            display_cols = ['price', 'timestamp', 'region', 'scraped_at']
-            if 'consensus' in source_data.columns and 'surprise' in source_data.columns:
-                display_cols.extend(['consensus', 'surprise'])
-            
-            st.dataframe(source_data[display_cols].tail(10))
-            
-            # Show source-specific chart if multiple data points
-            if len(source_data) > 1:
-                fig = px.line(source_data, x='scraped_at', y='price', 
-                             title=f'{source.replace("_", " ").title()} - Price Trend',
-                             markers=True)
-                st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info(f"No data available for {source}")
     
     # Footer
     st.markdown("---")
