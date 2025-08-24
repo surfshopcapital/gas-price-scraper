@@ -1,0 +1,1633 @@
+import time
+import schedule
+from datetime import datetime, timezone
+# import undetected_chromedriver as uc  # Commented out due to instability
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import NoSuchElementException
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium import webdriver
+import random
+import duckdb
+import os
+import pandas as pd
+
+class GasScraper:
+    def __init__(self, db_path="gas_prices.duckdb", headless=True):
+        """Initialize the Gas Scraper with DuckDB"""
+        self.db_path = db_path
+        self.headless = headless
+        self.driver = None
+        
+        # Initialize database
+        self.init_database()
+        
+    def init_database(self):
+        """Initialize DuckDB database with required tables"""
+        try:
+            # Connect to DuckDB (creates file if it doesn't exist)
+            conn = duckdb.connect(self.db_path)
+            
+            # Check if table exists, create only if it doesn't
+            table_exists = conn.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'gas_prices'").fetchone()[0]
+            if table_exists == 0:
+                print("   📊 Creating new gas_prices table...")
+            else:
+                print("   📊 Using existing gas_prices table...")
+                conn.close()
+                return
+            
+            # Create table with correct DuckDB syntax and auto-increment
+            conn.execute('''
+                CREATE TABLE gas_prices (
+                    id BIGINT PRIMARY KEY,
+                    price DOUBLE NOT NULL,
+                    timestamp VARCHAR NOT NULL,
+                    region VARCHAR NOT NULL,
+                    source VARCHAR NOT NULL,
+                    fuel_type VARCHAR NOT NULL,
+                    consensus DOUBLE,
+                    surprise DOUBLE,
+                    scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create sequence for auto-incrementing ID
+            conn.execute("CREATE SEQUENCE IF NOT EXISTS gas_prices_id_seq START 1")
+            
+            # Add consensus and surprise columns if they don't exist (for existing tables)
+            try:
+                conn.execute("ALTER TABLE gas_prices ADD COLUMN consensus DOUBLE")
+                print("   ✅ Added consensus column")
+            except:
+                pass  # Column already exists
+                
+            try:
+                conn.execute("ALTER TABLE gas_prices ADD COLUMN surprise DOUBLE")
+                print("   ✅ Added surprise column")
+            except:
+                pass  # Column already exists
+            
+            conn.close()
+            print(f"✅ Database initialized: {self.db_path}")
+            
+        except Exception as e:
+            print(f"❌ Error initializing database: {e}")
+    
+    def cleanup_chrome_processes(self):
+        """Force cleanup of any lingering Chrome processes"""
+        try:
+            import subprocess
+            import os
+            
+            # Kill any existing Chrome processes on Windows
+            if os.name == 'nt':  # Windows
+                try:
+                    subprocess.run(['taskkill', '/f', '/im', 'chrome.exe'], 
+                                 capture_output=True, check=False)
+                    subprocess.run(['taskkill', '/f', '/im', 'chromedriver.exe'], 
+                                 capture_output=True, check=False)
+                    time.sleep(1)  # Wait for processes to be killed
+                    print("   🧹 Cleaned up Chrome processes")
+                except:
+                    pass
+        except Exception as e:
+            print(f"   ⚠️ Chrome cleanup warning: {e}")
+    
+    def setup_chrome_driver(self):
+        """Set up Chrome driver with CDP capabilities"""
+        try:
+            print("🔧 Setting up Chrome driver...")
+            
+            # Force cleanup of any existing driver
+            if hasattr(self, 'driver') and self.driver:
+                try:
+                    self.driver.quit()
+                except:
+                    pass
+                self.driver = None
+            
+            # Force cleanup of Chrome processes
+            self.cleanup_chrome_processes()
+            
+            options = Options()
+            
+            if self.headless:
+                print("   👻 Running in headless mode")
+                options.add_argument('--headless')
+            else:
+                print("   📱 Running in visible mode")
+            
+            # Anti-detection options
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--disable-blink-features=AutomationControlled')
+            options.add_argument('--disable-extensions')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--disable-plugins')
+            options.add_argument('--disable-images')
+            # options.add_argument('--disable-javascript')  # Commented out - needed for dynamic content
+            
+            # User agent to look more human
+            options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            
+            print("   🚀 Launching Chrome...")
+            
+            # Use regular Selenium ChromeDriver instead of undetected_chromedriver
+            try:
+                # Try to use ChromeDriver from PATH first
+                self.driver = webdriver.Chrome(options=options)
+            except Exception as e:
+                print(f"   ⚠️ ChromeDriver not in PATH, trying alternative...")
+                try:
+                    # Try to use ChromeDriver from common locations
+                    import os
+                    chrome_paths = [
+                        "chromedriver.exe",
+                        os.path.join(os.getcwd(), "chromedriver.exe"),
+                        os.path.join(os.path.expanduser("~"), "chromedriver.exe")
+                    ]
+                    
+                    for chrome_path in chrome_paths:
+                        if os.path.exists(chrome_path):
+                            service = Service(chrome_path)
+                            self.driver = webdriver.Chrome(service=service, options=options)
+                            break
+                    else:
+                        raise Exception("ChromeDriver not found in any expected location")
+                except Exception as e2:
+                    print(f"   ❌ ChromeDriver setup failed: {e2}")
+                    return None
+            
+            # Set window size
+            self.driver.set_window_size(1920, 1080)
+            print("   ✅ Chrome driver setup complete")
+            
+            return self.driver
+            
+        except Exception as e:
+            print(f"❌ Error setting up Chrome driver: {e}")
+            return None
+    
+    def scrape_gasbuddy(self):
+        """Scrape GasBuddy Fuel Insights"""
+        try:
+            print("🚀 Starting GasBuddy scraping...")
+            
+            # Setup Chrome driver
+            if not self.setup_chrome_driver():
+                print("❌ Failed to setup Chrome driver")
+                return None
+            
+            # Set location permissions and coordinates BEFORE navigating
+            print("📍 Setting geolocation permissions and coordinates...")
+            
+            # US cities with coordinates for randomization
+            us_cities = [
+                {"name": "New York", "lat": 40.7128, "lng": -74.0060},
+                {"name": "Los Angeles", "lat": 34.0522, "lng": -118.2437},
+                {"name": "Chicago", "lat": 41.8781, "lng": -87.6298},
+                {"name": "Houston", "lat": 29.7604, "lng": -95.3698},
+                {"name": "Phoenix", "lat": 33.4484, "lng": -112.0740}
+            ]
+            
+            # Randomly select a US city
+            selected_city = random.choice(us_cities)
+            print(f"   🏙️ Selected location: {selected_city['name']}")
+            
+            # Grant geolocation permissions to the target domain FIRST
+            try:
+                self.driver.execute_cdp_cmd(
+                    "Browser.grantPermissions",
+                    {
+                        "origin": "https://fuelinsights.gasbuddy.com/",
+                        "permissions": ["geolocation"],
+                    }
+                )
+                print("   ✅ Geolocation permissions granted")
+            except Exception as e:
+                print(f"   ⚠️ Could not grant permissions: {e}")
+            
+            # Set the geolocation coordinates
+            try:
+                self.driver.execute_cdp_cmd(
+                    "Emulation.setGeolocationOverride",
+                    {
+                        "latitude": selected_city['lat'],
+                        "longitude": selected_city['lng'],
+                        "accuracy": 100,
+                    }
+                )
+                print("   ✅ Geolocation coordinates set")
+            except Exception as e:
+                print(f"   ⚠️ Could not set coordinates: {e}")
+            
+            # Small delay to ensure CDP commands are processed
+            time.sleep(1)
+            
+            # Navigate to GasBuddy AFTER setting permissions
+            target_url = "https://fuelinsights.gasbuddy.com/"
+            print(f"🌐 Navigating to: {target_url}")
+            self.driver.get(target_url)
+            
+            # Wait for SPA to load - longer wait since it's an SPA
+            print("⏳ Waiting for SPA to load...")
+            time.sleep(8)
+            
+            # Try to wait for specific elements to appear
+            try:
+                from selenium.webdriver.support.ui import WebDriverWait
+                from selenium.webdriver.support import expected_conditions as EC
+                
+                # Wait for the application host to have content
+                WebDriverWait(self.driver, 15).until(
+                    lambda driver: len(driver.find_element(By.ID, "applicationHost").text) > 100
+                )
+                print("   ✅ SPA content loaded")
+            except Exception as e:
+                print(f"   ⚠️ SPA content may not be fully loaded: {e}")
+            
+            # Extract gas price data
+            gas_data = self.extract_gasbuddy_data()
+            
+            if gas_data:
+                print("🎉 Successfully extracted GasBuddy data!")
+                return gas_data
+            else:
+                print("❌ Failed to extract GasBuddy data")
+                # Try to get page source for debugging
+                try:
+                    page_source = self.driver.page_source
+                    if "tickingAvgPriceText" in page_source:
+                        print("   🔍 Price element ID found in page source")
+                    else:
+                        print("   ❌ Price element ID not found in page source")
+                        print(f"   📄 Page title: {self.driver.title}")
+                        print(f"   🔗 Current URL: {self.driver.current_url}")
+                except Exception as e:
+                    print(f"   ⚠️ Could not analyze page: {e}")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in GasBuddy scraping: {e}")
+            return None
+            
+        finally:
+            # Always close the driver
+            if self.driver:
+                print("🔒 Closing Chrome driver...")
+                try:
+                    self.driver.quit()
+                except Exception as e:
+                    print(f"⚠️ Warning during driver cleanup: {e}")
+                self.driver = None
+    
+    def scrape_aaa(self):
+        """Scrape AAA Gas Prices"""
+        try:
+            print("🚗 Starting AAA scraping...")
+            
+            # Setup Chrome driver
+            if not self.setup_chrome_driver():
+                print("❌ Failed to setup Chrome driver")
+                return None
+            
+            # Navigate to AAA
+            target_url = "https://gasprices.aaa.com/"
+            print(f"🌐 Navigating to: {target_url}")
+            self.driver.get(target_url)
+            
+            # Wait for page to load - longer wait for table data
+            print("⏳ Waiting for page to load...")
+            time.sleep(8)
+            
+            # Try to wait for the table to appear
+            try:
+                from selenium.webdriver.support.ui import WebDriverWait
+                from selenium.webdriver.support import expected_conditions as EC
+                
+                # Wait for the tbody element to have content
+                WebDriverWait(self.driver, 15).until(
+                    lambda driver: len(driver.find_element(By.TAG_NAME, "tbody").text) > 50
+                )
+                print("   ✅ AAA table data loaded")
+            except Exception as e:
+                print(f"   ⚠️ AAA table may not be fully loaded: {e}")
+            
+            # Extract AAA data BEFORE any cleanup
+            aaa_data = self.extract_aaa_data()
+            
+            if aaa_data:
+                print("🎉 Successfully extracted AAA data!")
+                return aaa_data
+            else:
+                print("❌ Failed to extract AAA data")
+                # Try to get page source for debugging
+                try:
+                    page_source = self.driver.page_source
+                    if "Current Avg." in page_source:
+                        print("   🔍 Current Avg. text found in page source")
+                    else:
+                        print("   ❌ Current Avg. text not found in page source")
+                        print(f"   📄 Page title: {self.driver.title}")
+                        print(f"   🔗 Current URL: {self.driver.current_url}")
+                except Exception as e:
+                    print(f"   ⚠️ Could not analyze page: {e}")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in AAA scraping: {e}")
+            return None
+            
+        finally:
+            # Clean up driver AFTER data extraction
+            if self.driver:
+                print("🔒 Closing Chrome driver...")
+                try:
+                    self.driver.quit()
+                except Exception as e:
+                    print(f"⚠️ Warning during driver cleanup: {e}")
+                self.driver = None
+            
+            # Force cleanup of Chrome processes
+            self.cleanup_chrome_processes()
+    
+    def set_location_permissions_and_coordinates(self):
+        """Set geolocation permissions and coordinates using CDP"""
+        try:
+            print("📍 Setting geolocation permissions and coordinates...")
+            
+            # US cities with coordinates for randomization
+            us_cities = [
+                {"name": "New York", "lat": 40.7128, "lng": -74.0060},
+                {"name": "Los Angeles", "lat": 34.0522, "lng": -118.2437},
+                {"name": "Chicago", "lat": 41.8781, "lng": -87.6298},
+                {"name": "Houston", "lat": 29.7604, "lng": -95.3698},
+                {"name": "Phoenix", "lat": 33.4484, "lng": -112.0740}
+            ]
+            
+            # Randomly select a US city
+            selected_city = random.choice(us_cities)
+            print(f"   🏙️ Selected location: {selected_city['name']}")
+            
+            # Grant geolocation permissions to the target domain
+            self.driver.execute_cdp_cmd(
+                "Browser.grantPermissions",
+                {
+                    "origin": "https://fuelinsights.gasbuddy.com/",
+                    "permissions": ["geolocation"],
+                }
+            )
+            
+            # Set the geolocation coordinates
+            self.driver.execute_cdp_cmd(
+                "Emulation.setGeolocationOverride",
+                {
+                    "latitude": selected_city['lat'],
+                    "longitude": selected_city['lng'],
+                    "accuracy": 100,
+                }
+            )
+            
+            print("   ✅ Location permissions and coordinates set")
+            return selected_city
+            
+        except Exception as e:
+            print(f"❌ Error setting location permissions: {e}")
+            return None
+    
+    def wait_for_spa_load(self):
+        """Wait for the SPA to fully load and render"""
+        try:
+            print("⏳ Waiting for SPA to load...")
+            
+            # Wait for the page to be ready
+            WebDriverWait(self.driver, 10).until(
+                lambda driver: driver.execute_script("return document.readyState") == "complete"
+            )
+            
+            # Wait for SPA content to start loading
+            time.sleep(5)
+            
+            # Check if applicationHost has content
+            app_host = self.driver.find_element(By.ID, "applicationHost")
+            app_content = app_host.text.strip()
+            
+            if len(app_content) > 1000:
+                print("   ✅ SPA content loaded successfully")
+                return True
+            else:
+                print("   ⚠️ SPA content still minimal, waiting longer...")
+                time.sleep(10)
+                
+                # Check again
+                app_content = app_host.text.strip()
+                if len(app_content) > 1000:
+                    print("   ✅ SPA content loaded after additional wait")
+                    return True
+                else:
+                    print("   ❌ SPA content failed to load")
+                    return False
+                    
+        except Exception as e:
+            print(f"❌ Error waiting for SPA load: {e}")
+            return False
+    
+    def extract_gasbuddy_data(self):
+        """Extract gas price data from GasBuddy"""
+        try:
+            print("🔍 Extracting GasBuddy data...")
+            
+            # Look for the gas price element
+            price_element = self.driver.find_element(By.ID, "tickingAvgPriceText")
+            price_text = price_element.text.strip()
+            print(f"   ✅ Found gas price: {price_text}")
+            
+            # Look for timestamp
+            timestamp = "Unknown"
+            try:
+                timestamp_element = self.driver.find_element(By.CSS_SELECTOR, "div[data-bind*='tickingAvgLastUpdated']")
+                timestamp = timestamp_element.text.strip()
+                print(f"   🕒 Found timestamp: {timestamp}")
+            except NoSuchElementException:
+                print("   ⚠️ Timestamp element not found")
+            
+            # Extract price
+            try:
+                price = float(price_text)
+                print(f"   🎯 Successfully extracted price: ${price}")
+                return {
+                    'price': price,
+                    'timestamp': timestamp,
+                    'region': 'United States',
+                    'source': 'gasbuddy_fuel_insights',
+                    'fuel_type': 'regular'
+                }
+                
+            except ValueError:
+                print(f"   ❌ Could not convert '{price_text}' to float")
+                return None
+                
+        except NoSuchElementException:
+            print("   ❌ Gas price element not found")
+            return None
+        except Exception as e:
+            print(f"❌ Error extracting GasBuddy data: {e}")
+            return None
+    
+    def extract_gasbuddy_data_from_driver(self, driver):
+        """Extract gas price data from GasBuddy using provided driver"""
+        try:
+            print("🔍 Extracting GasBuddy data...")
+            
+            # Look for the gas price element
+            price_element = driver.find_element(By.ID, "tickingAvgPriceText")
+            price_text = price_element.text.strip()
+            print(f"   ✅ Found gas price: {price_text}")
+            
+            # Look for timestamp
+            timestamp = "Unknown"
+            try:
+                timestamp_element = driver.find_element(By.CSS_SELECTOR, "div[data-bind*='tickingAvgLastUpdated']")
+                timestamp = timestamp_element.text.strip()
+                print(f"   🕒 Found timestamp: {timestamp}")
+            except NoSuchElementException:
+                print("   ⚠️ Timestamp element not found")
+            
+            # Extract price
+            try:
+                # Remove '$' and convert to float
+                price = float(price_text.replace('$', ''))
+                print(f"   🎯 Successfully extracted gas price: ${price}")
+                
+                return {
+                    'price': price,
+                    'timestamp': timestamp,
+                    'region': 'United States',
+                    'source': 'gasbuddy_fuel_insights',
+                    'fuel_type': 'regular_gas'
+                }
+                
+            except ValueError:
+                print(f"   ❌ Could not convert price '{price_text}' to float")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error extracting GasBuddy data: {e}")
+            return None
+    
+    def extract_aaa_data(self):
+        """Extract gas price data from AAA"""
+        try:
+            print("🔍 Extracting AAA data...")
+            
+            # Find the table with the price data
+            table = self.driver.find_element(By.TAG_NAME, "tbody")
+            rows = table.find_elements(By.TAG_NAME, "tr")
+            
+            current_price = None
+            yesterday_price = None
+            
+            # Extract data from each row
+            for row in rows:
+                cells = row.find_elements(By.TAG_NAME, "td")
+                if len(cells) >= 2:
+                    period = cells[0].text.strip()
+                    regular_price = cells[1].text.strip()
+                    
+                    if "Current Avg." in period:
+                        current_price = regular_price.replace('$', '').strip()
+                        print(f"   ✅ Current Avg.: ${current_price}")
+                    elif "Yesterday Avg." in period:
+                        yesterday_price = regular_price.replace('$', '').strip()
+                        print(f"   ✅ Yesterday Avg.: ${yesterday_price}")
+            
+            if current_price and yesterday_price:
+                # Save both current and yesterday prices
+                results = []
+                
+                # Current price
+                try:
+                    current_float = float(current_price)
+                    results.append({
+                        'price': current_float,
+                        'timestamp': f"Current as of {datetime.now().strftime('%Y-%m-%d')}",
+                        'region': 'United States',
+                        'source': 'aaa_gas_prices',
+                        'fuel_type': 'regular'
+                    })
+                    print(f"   🎯 Current price: ${current_float}")
+                except ValueError:
+                    print(f"   ❌ Could not convert current price '{current_price}' to float")
+                
+                # Yesterday price
+                try:
+                    yesterday_float = float(yesterday_price)
+                    results.append({
+                        'price': yesterday_float,
+                        'timestamp': f"Yesterday as of {datetime.now().strftime('%Y-%m-%d')}",
+                        'region': 'United States',
+                        'source': 'aaa_gas_prices',
+                        'fuel_type': 'regular'
+                    })
+                    print(f"   🎯 Yesterday price: ${yesterday_float}")
+                except ValueError:
+                    print(f"   ❌ Could not convert yesterday price '{yesterday_price}' to float")
+                
+                return results if results else None
+            else:
+                print("   ❌ Could not find current or yesterday prices")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error extracting AAA data: {e}")
+            return None
+    
+    def extract_aaa_data_from_driver(self, driver):
+        """Extract gas price data from AAA using provided driver"""
+        try:
+            print("🔍 Extracting AAA data...")
+            
+            # Find the table with the price data
+            table = driver.find_element(By.TAG_NAME, "tbody")
+            rows = table.find_elements(By.TAG_NAME, "tr")
+            
+            current_price = None
+            yesterday_price = None
+            
+            # Extract data from each row
+            for row in rows:
+                cells = row.find_elements(By.TAG_NAME, "td")
+                if len(cells) >= 2:
+                    period = cells[0].text.strip()
+                    regular_price = cells[1].text.strip()
+                    
+                    if "Current Avg." in period:
+                        current_price = regular_price.replace('$', '').strip()
+                        print(f"   ✅ Current Avg.: ${current_price}")
+                    elif "Yesterday Avg." in period:
+                        yesterday_price = regular_price.replace('$', '').strip()
+                        print(f"   ✅ Yesterday Avg.: ${yesterday_price}")
+            
+            if current_price and yesterday_price:
+                # Save both current and yesterday prices
+                results = []
+                
+                # Current price
+                try:
+                    current_float = float(current_price)
+                    results.append({
+                        'price': current_float,
+                        'timestamp': f"Current as of {datetime.now().strftime('%Y-%m-%d')}",
+                        'region': 'United States',
+                        'source': 'aaa_gas_prices',
+                        'fuel_type': 'regular'
+                    })
+                    print(f"   🎯 Current price: ${current_float}")
+                except ValueError:
+                    print(f"   ❌ Could not convert current price '{current_price}' to float")
+                
+                # Yesterday price
+                try:
+                    yesterday_float = float(yesterday_price)
+                    results.append({
+                        'price': yesterday_float,
+                        'timestamp': f"Yesterday as of {datetime.now().strftime('%Y-%m-%d')}",
+                        'region': 'United States',
+                        'source': 'aaa_gas_prices',
+                        'fuel_type': 'regular'
+                    })
+                    print(f"   🎯 Yesterday price: ${yesterday_float}")
+                except ValueError:
+                    print(f"   ❌ Could not convert yesterday price '{yesterday_price}' to float")
+                
+                return results if results else None
+            else:
+                print("   ❌ Could not find current or yesterday prices")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error extracting AAA data: {e}")
+            return None
+    
+    def scrape_rbob(self):
+        """Scrape RBOB Futures from MarketWatch"""
+        driver = None
+        try:
+            print("⛽ Starting RBOB futures scraping...")
+            
+            # Setup Chrome driver
+            if not self.setup_chrome_driver():
+                print("❌ Failed to setup Chrome driver")
+                return None
+            
+            # Store reference to driver
+            driver = self.driver
+            
+            # Navigate to MarketWatch RBOB futures
+            target_url = "https://www.marketwatch.com/investing/future/rb.1"
+            print(f"🌐 Navigating to: {target_url}")
+            driver.get(target_url)
+            
+            # Wait for page to load
+            print("⏳ Waiting for page to load...")
+            time.sleep(5)
+            
+            # Extract RBOB data BEFORE any cleanup
+            rbob_data = self.extract_rbob_data()
+            
+            if rbob_data:
+                print("🎉 Successfully extracted RBOB data!")
+                return rbob_data
+            else:
+                print("❌ Failed to extract RBOB data")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in RBOB scraping: {e}")
+            return None
+            
+        finally:
+            # Clean up driver AFTER data extraction
+            if driver:
+                print("🔒 Closing Chrome driver...")
+                try:
+                    driver.quit()
+                except Exception as e:
+                    print(f"⚠️ Warning during driver cleanup: {e}")
+                self.driver = None
+            
+            # Force cleanup of Chrome processes
+            self.cleanup_chrome_processes()
+    
+    def extract_rbob_data(self):
+        """Extract RBOB futures data from MarketWatch"""
+        try:
+            print("🔍 Extracting RBOB futures data...")
+            
+            # Find the price element
+            price_element = self.driver.find_element(By.CSS_SELECTOR, "span.value")
+            price_text = price_element.text.strip()
+            print(f"   ✅ Found RBOB price: ${price_text}")
+            
+            # Find the timestamp element
+            timestamp_element = self.driver.find_element(By.CSS_SELECTOR, "span.timestamp__time")
+            timestamp_text = timestamp_element.text.strip()
+            print(f"   🕒 Found timestamp: {timestamp_text}")
+            
+            # Extract price
+            try:
+                price = float(price_text)
+                print(f"   🎯 Successfully extracted RBOB price: ${price}")
+                
+                # Clean up timestamp text
+                timestamp = timestamp_text.replace("Last Updated: ", "").strip()
+                
+                return {
+                    'price': price,
+                    'timestamp': timestamp,
+                    'region': 'United States',
+                    'source': 'marketwatch_rbob_futures',
+                    'fuel_type': 'rbob_futures'
+                }
+                
+            except ValueError:
+                print(f"   ❌ Could not convert RBOB price '{price_text}' to float")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error extracting RBOB data: {e}")
+            return None
+    
+    def scrape_wti(self):
+        """Scrape WTI Crude Oil Futures from MarketWatch"""
+        driver = None
+        try:
+            print("🛢️ Starting WTI crude oil futures scraping...")
+            
+            # Setup Chrome driver
+            if not self.setup_chrome_driver():
+                print("❌ Failed to setup Chrome driver")
+                return None
+            
+            # Store reference to driver
+            driver = self.driver
+            
+            # Navigate to MarketWatch WTI futures
+            target_url = "https://www.marketwatch.com/investing/future/cl.1"
+            print(f"🌐 Navigating to: {target_url}")
+            driver.get(target_url)
+            
+            # Wait for page to load
+            print("⏳ Waiting for page to load...")
+            time.sleep(5)
+            
+            # Extract WTI data BEFORE any cleanup
+            wti_data = self.extract_wti_data()
+            
+            if wti_data:
+                print("🎉 Successfully extracted WTI data!")
+                return wti_data
+            else:
+                print("❌ Failed to extract WTI data")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in WTI scraping: {e}")
+            return None
+            
+        finally:
+            # Clean up driver AFTER data extraction
+            if driver:
+                print("🔒 Closing Chrome driver...")
+                try:
+                    driver.quit()
+                except Exception as e:
+                    print(f"⚠️ Warning during driver cleanup: {e}")
+                self.driver = None
+    
+    def extract_wti_data(self):
+        """Extract WTI crude oil futures data from MarketWatch"""
+        try:
+            print("🔍 Extracting WTI crude oil futures data...")
+            
+            # Find the price element
+            price_element = self.driver.find_element(By.CSS_SELECTOR, "span.value")
+            price_text = price_element.text.strip()
+            print(f"   ✅ Found WTI price: ${price_text}")
+            
+            # Find the timestamp element
+            timestamp_element = self.driver.find_element(By.CSS_SELECTOR, "span.timestamp__time")
+            timestamp_text = timestamp_element.text.strip()
+            print(f"   🕒 Found timestamp: {timestamp_text}")
+            
+            # Extract price
+            try:
+                price = float(price_text)
+                print(f"   🎯 Successfully extracted WTI price: ${price}")
+                
+                # Clean up timestamp text
+                timestamp = timestamp_text.replace("Last Updated: ", "").strip()
+                
+                return {
+                    'price': price,
+                    'timestamp': timestamp,
+                    'region': 'United States',
+                    'source': 'marketwatch_wti_futures',
+                    'fuel_type': 'wti_futures'
+                }
+                
+            except ValueError:
+                print(f"   ❌ Could not convert WTI price '{price_text}' to float")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error extracting WTI data: {e}")
+            return None
+    
+    def scrape_gasoline_stocks(self):
+        """Scrape Gasoline Stocks Change from Trading Economics"""
+        driver = None
+        try:
+            print("⛽ Starting Gasoline Stocks Change scraping...")
+            
+            # Setup Chrome driver
+            if not self.setup_chrome_driver():
+                print("❌ Failed to setup Chrome driver")
+                return None
+            
+            # Store reference to driver
+            driver = self.driver
+            
+            # Navigate to Trading Economics Gasoline Stocks Change
+            target_url = "https://tradingeconomics.com/united-states/gasoline-stocks-change"
+            print(f"🌐 Navigating to: {target_url}")
+            driver.get(target_url)
+            
+            # Wait for page to load
+            print("⏳ Waiting for page to load...")
+            time.sleep(8)
+            
+            # Extract Gasoline Stocks data BEFORE any cleanup
+            stocks_data = self.extract_gasoline_stocks_data()
+            
+            if stocks_data:
+                print("🎉 Successfully extracted Gasoline Stocks data!")
+                return stocks_data
+            else:
+                print("❌ Failed to extract Gasoline Stocks data")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in Gasoline Stocks scraping: {e}")
+            return None
+            
+        finally:
+            # Clean up driver AFTER data extraction
+            if driver:
+                print("🔒 Closing Chrome driver...")
+                try:
+                    driver.quit()
+                except Exception as e:
+                    print(f"⚠️ Warning during driver cleanup: {e}")
+                self.driver = None
+    
+    def extract_gasoline_stocks_data(self):
+        """Extract Gasoline Stocks Change data from Trading Economics"""
+        try:
+            print("🔍 Extracting Gasoline Stocks Change data...")
+            
+            # Find all rows with actual data
+            actual_elements = self.driver.find_elements(By.CSS_SELECTOR, "td#actual")
+            
+            if not actual_elements:
+                print("   ❌ No actual data elements found")
+                return None
+            
+            # Find the most recent date with actual data
+            latest_date = None
+            latest_row = None
+            latest_actual = None
+            latest_consensus = None
+            
+            for actual_element in actual_elements:
+                row = actual_element.find_element(By.XPATH, "./..")  # Go to parent tr
+                date_element = row.find_element(By.XPATH, "./td[1]")
+                date_text = date_element.text.strip()
+                
+                # Skip if no actual value
+                actual_text = actual_element.text.strip()
+                if not actual_text or actual_text == '':
+                    continue
+                
+                # Parse date (format: YYYY-MM-DD)
+                try:
+                    date_parts = date_text.split('-')
+                    if len(date_parts) == 3:
+                        year, month, day = int(date_parts[0]), int(date_parts[1]), int(date_parts[2])
+                        current_date = datetime(year, month, day).date()
+                        
+                        if latest_date is None or current_date > latest_date:
+                            latest_date = current_date
+                            latest_row = row
+                            latest_actual = actual_text
+                            
+                            # Get consensus from the same row (7th column)
+                            consensus_element = row.find_element(By.XPATH, "./td[7]")
+                            latest_consensus = consensus_element.text.strip()
+                            
+                except (ValueError, IndexError) as e:
+                    print(f"   ⚠️ Could not parse date '{date_text}': {e}")
+                    continue
+            
+            if latest_date is None:
+                print("   ❌ No valid dates with actual data found")
+                return None
+            
+            print(f"   📅 Found latest date: {latest_date}")
+            print(f"   ✅ Found actual value: {latest_actual}")
+            print(f"   📊 Found consensus: {latest_consensus}")
+            
+            # Extract numeric values
+            try:
+                # Remove 'M' suffix and convert to float
+                actual_value = float(latest_actual.replace('M', ''))
+                consensus_value = float(latest_consensus.replace('M', '')) if latest_consensus and latest_consensus != '' else 0.0
+                
+                # Calculate surprise
+                surprise = actual_value - consensus_value
+                
+                print(f"   🎯 Actual: {actual_value}M")
+                print(f"   🎯 Consensus: {consensus_value}M")
+                print(f"   🎯 Surprise: {surprise}M")
+                
+                return {
+                    'price': actual_value,
+                    'timestamp': f"{latest_date.strftime('%Y-%m-%d')}",
+                    'region': 'United States',
+                    'source': 'tradingeconomics_gasoline_stocks',
+                    'fuel_type': 'gasoline_stocks_change',
+                    'consensus': consensus_value,
+                    'surprise': surprise
+                }
+                
+            except ValueError as e:
+                print(f"   ❌ Could not convert values to float: {e}")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error extracting Gasoline Stocks data: {e}")
+            return None
+    
+    def scrape_refinery_runs(self):
+        """Scrape Refinery Crude Runs from Trading Economics"""
+        driver = None
+        try:
+            print("🏭 Starting Refinery Crude Runs scraping...")
+            
+            # Setup Chrome driver
+            if not self.setup_chrome_driver():
+                print("❌ Failed to setup Chrome driver")
+                return None
+            
+            # Store reference to driver
+            driver = self.driver
+            
+            # Navigate to Trading Economics Refinery Crude Runs
+            target_url = "https://tradingeconomics.com/united-states/refinery-crude-runs"
+            print(f"🌐 Navigating to: {target_url}")
+            driver.get(target_url)
+            
+            # Wait for page to load
+            print("⏳ Waiting for page to load...")
+            time.sleep(8)
+            
+            # Extract Refinery Runs data BEFORE any cleanup
+            runs_data = self.extract_refinery_runs_data()
+            
+            if runs_data:
+                print("🎉 Successfully extracted Refinery Crude Runs data!")
+                return runs_data
+            else:
+                print("❌ Failed to extract Refinery Crude Runs data")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in Refinery Runs scraping: {e}")
+            return None
+            
+        finally:
+            # Clean up driver AFTER data extraction
+            if driver:
+                print("🔒 Closing Chrome driver...")
+                try:
+                    driver.quit()
+                except Exception as e:
+                    print(f"⚠️ Warning during driver cleanup: {e}")
+                self.driver = None
+    
+    def extract_refinery_runs_data(self):
+        """Extract Refinery Crude Runs data from Trading Economics"""
+        try:
+            print("🔍 Extracting Refinery Crude Runs data...")
+            
+            # Find all rows with actual data
+            actual_elements = self.driver.find_elements(By.CSS_SELECTOR, "td#actual")
+            
+            if not actual_elements:
+                print("   ❌ No actual data elements found")
+                return None
+            
+            # Find the most recent date with actual data
+            latest_date = None
+            latest_actual = None
+            
+            for actual_element in actual_elements:
+                row = actual_element.find_element(By.XPATH, "./..")  # Go to parent tr
+                date_element = row.find_element(By.XPATH, "./td[1]")
+                date_text = date_element.text.strip()
+                
+                # Skip if no actual value
+                actual_text = actual_element.text.strip()
+                if not actual_text or actual_text == '':
+                    continue
+                
+                # Parse date (format: YYYY-MM-DD)
+                try:
+                    date_parts = date_text.split('-')
+                    if len(date_parts) == 3:
+                        year, month, day = int(date_parts[0]), int(date_parts[1]), int(date_parts[2])
+                        current_date = datetime(year, month, day).date()
+                        
+                        if latest_date is None or current_date > latest_date:
+                            latest_date = current_date
+                            latest_actual = actual_text
+                            
+                except (ValueError, IndexError) as e:
+                    print(f"   ⚠️ Could not parse date '{date_text}': {e}")
+                    continue
+            
+            if latest_date is None:
+                print("   ❌ No valid dates with actual data found")
+                return None
+            
+            print(f"   📅 Found latest date: {latest_date}")
+            print(f"   ✅ Found actual value: {latest_actual}")
+            
+            # Extract numeric value
+            try:
+                # Remove 'M' suffix and convert to float
+                actual_value = float(latest_actual.replace('M', ''))
+                
+                print(f"   🎯 Actual: {actual_value}M")
+                
+                return {
+                    'price': actual_value,
+                    'timestamp': f"{latest_date.strftime('%Y-%m-%d')}",
+                    'region': 'United States',
+                    'source': 'tradingeconomics_refinery_runs',
+                    'fuel_type': 'refinery_crude_runs'
+                }
+                
+            except ValueError as e:
+                print(f"   ❌ Could not convert value to float: {e}")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error extracting Refinery Runs data: {e}")
+            return None
+    
+    def save_to_database(self, gas_data_list):
+        """Save gas price data to DuckDB"""
+        if not gas_data_list:
+            return False
+        
+        # Handle single item or list
+        if not isinstance(gas_data_list, list):
+            gas_data_list = [gas_data_list]
+            
+        try:
+            conn = duckdb.connect(self.db_path)
+            
+            saved_count = 0
+            for gas_data in gas_data_list:
+                # Check if consensus and surprise exist (for EIA data)
+                consensus = gas_data.get('consensus', None)
+                surprise = gas_data.get('surprise', None)
+                
+                # Insert the data with auto-incrementing ID using sequence
+                conn.execute('''
+                    INSERT INTO gas_prices (id, price, timestamp, region, source, fuel_type, consensus, surprise)
+                    VALUES (nextval('gas_prices_id_seq'), ?, ?, ?, ?, ?, ?, ?)
+                ''', [gas_data['price'], gas_data['timestamp'], gas_data['region'], gas_data['source'], gas_data['fuel_type'], consensus, surprise])
+                
+                saved_count += 1
+                print(f"   ✅ Saved: ${gas_data['price']} from {gas_data['source']}")
+                if consensus is not None and surprise is not None:
+                    print(f"      📊 Consensus: {consensus}M, Surprise: {surprise}M")
+            
+            conn.close()
+            
+            print(f"✅ Successfully saved {saved_count} records to database")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error saving to database: {e}")
+            return False
+    
+    def run_gasbuddy_job(self):
+        """Run GasBuddy scraping job"""
+        print(f"\n--- Starting GasBuddy scraping job at {datetime.now()} ---")
+        
+        gas_data = self.scrape_gasbuddy()
+        if gas_data:
+            self.save_to_database(gas_data)
+            print(f"🎯 GasBuddy: ${gas_data['price']} at {gas_data['timestamp']}")
+        else:
+            print("❌ Failed to scrape GasBuddy data")
+    
+    def run_aaa_job(self):
+        """Run AAA scraping job"""
+        print(f"\n--- Starting AAA scraping job at {datetime.now()} ---")
+        
+        aaa_data = self.scrape_aaa()
+        if aaa_data:
+            self.save_to_database(aaa_data)
+            print(f"🎯 AAA: Extracted {len(aaa_data)} price records")
+        else:
+            print("❌ Failed to scrape AAA data")
+    
+    def run_rbob_job(self):
+        """Run RBOB futures scraping job"""
+        print(f"\n--- Starting RBOB futures scraping job at {datetime.now()} ---")
+        
+        rbob_data = self.scrape_rbob()
+        if rbob_data:
+            self.save_to_database(rbob_data)
+            print(f"🎯 RBOB: ${rbob_data['price']} at {rbob_data['timestamp']}")
+        else:
+            print("❌ Failed to scrape RBOB data")
+    
+    def run_wti_job(self):
+        """Run WTI crude oil futures scraping job"""
+        print(f"\n--- Starting WTI crude oil futures scraping job at {datetime.now()} ---")
+        
+        wti_data = self.scrape_wti()
+        if wti_data:
+            self.save_to_database(wti_data)
+            print(f"🎯 WTI: ${wti_data['price']} at {wti_data['timestamp']}")
+        else:
+            print("❌ Failed to scrape WTI data")
+    
+    def run_gasoline_stocks_job(self):
+        """Run Gasoline Stocks Change scraping job"""
+        print(f"\n--- Starting Gasoline Stocks Change scraping job at {datetime.now()} ---")
+        
+        stocks_data = self.scrape_gasoline_stocks()
+        if stocks_data:
+            self.save_to_database(stocks_data)
+            print(f"🎯 Gasoline Stocks: {stocks_data['price']}M at {stocks_data['timestamp']}")
+        else:
+            print("❌ Failed to scrape Gasoline Stocks data")
+    
+    def run_refinery_runs_job(self):
+        """Run Refinery Crude Runs scraping job"""
+        print(f"\n--- Starting Refinery Crude Runs scraping job at {datetime.now()} ---")
+        
+        runs_data = self.scrape_refinery_runs()
+        if runs_data:
+            self.save_to_database(runs_data)
+            print(f"🎯 Refinery Runs: {runs_data['price']}M at {runs_data['timestamp']}")
+        else:
+            print("❌ Failed to scrape Refinery Runs data")
+    
+    def get_latest_prices(self, limit=20):
+        """Retrieve the latest gas prices from the database"""
+        try:
+            conn = duckdb.connect(self.db_path)
+            
+            results = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, scraped_at
+                FROM gas_prices
+                ORDER BY scraped_at DESC
+                LIMIT ?
+            ''', [limit]).fetchall()
+            
+            conn.close()
+            return results
+            
+        except Exception as e:
+            print(f"Error retrieving data: {e}")
+            return []
+    
+    def export_daily_excel(self):
+        """Export today's data to Excel with 3 tabs (GasBuddy, AAA, RBOB)"""
+        try:
+            print("📊 Exporting daily data to Excel...")
+            
+            # Get today's date
+            today = datetime.now().date()
+            
+            # Connect to database
+            conn = duckdb.connect(self.db_path)
+            
+            # Get data for each source for today
+            gasbuddy_data = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, scraped_at
+                FROM gas_prices
+                WHERE source = 'gasbuddy_fuel_insights'
+                AND DATE(scraped_at) = ?
+                ORDER BY scraped_at DESC
+            ''', [today]).fetchall()
+            
+            aaa_data = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, scraped_at
+                FROM gas_prices
+                WHERE source = 'aaa_gas_prices'
+                AND DATE(scraped_at) = ?
+                ORDER BY scraped_at DESC
+            ''', [today]).fetchall()
+            
+            rbob_data = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, scraped_at
+                FROM gas_prices
+                WHERE source = 'marketwatch_rbob_futures'
+                AND DATE(scraped_at) = ?
+                ORDER BY scraped_at DESC
+            ''', [today]).fetchall()
+            
+            wti_data = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, scraped_at
+                FROM gas_prices
+                WHERE source = 'marketwatch_wti_futures'
+                AND DATE(scraped_at) = ?
+                ORDER BY scraped_at DESC
+            ''', [today]).fetchall()
+            
+            gasoline_stocks_data = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, consensus, surprise, scraped_at
+                FROM gas_prices
+                WHERE source = 'tradingeconomics_gasoline_stocks'
+                AND DATE(scraped_at) = ?
+                ORDER BY scraped_at DESC
+            ''', [today]).fetchall()
+            
+            refinery_runs_data = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, scraped_at
+                FROM gas_prices
+                WHERE source = 'tradingeconomics_refinery_runs'
+                AND DATE(scraped_at) = ?
+                ORDER BY scraped_at DESC
+            ''', [today]).fetchall()
+            
+            conn.close()
+            
+            # Create Excel file with 6 tabs
+            filename = f"gas_prices_daily_{today.strftime('%Y%m%d')}.xlsx"
+            
+            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+                # GasBuddy tab
+                if gasbuddy_data:
+                    gasbuddy_df = pd.DataFrame(gasbuddy_data, 
+                                             columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    gasbuddy_df.to_excel(writer, sheet_name='GasBuddy', index=False)
+                    print(f"   ✅ GasBuddy: {len(gasbuddy_data)} records")
+                else:
+                    # Create empty DataFrame with headers
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    empty_df.to_excel(writer, sheet_name='GasBuddy', index=False)
+                    print("   ⚠️ GasBuddy: No data for today")
+                
+                # AAA tab
+                if aaa_data:
+                    aaa_df = pd.DataFrame(aaa_data, 
+                                        columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    aaa_df.to_excel(writer, sheet_name='AAA', index=False)
+                    print(f"   ✅ AAA: {len(aaa_data)} records")
+                else:
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    empty_df.to_excel(writer, sheet_name='AAA', index=False)
+                    print("   ⚠️ AAA: No data for today")
+                
+                # RBOB tab
+                if rbob_data:
+                    rbob_df = pd.DataFrame(rbob_data, 
+                                         columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    rbob_df.to_excel(writer, sheet_name='RBOB', index=False)
+                    print(f"   ✅ RBOB: {len(rbob_data)} records")
+                else:
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    empty_df.to_excel(writer, sheet_name='RBOB', index=False)
+                    print("   ⚠️ RBOB: No data for today")
+                
+                # WTI tab
+                if wti_data:
+                    wti_df = pd.DataFrame(wti_data, 
+                                        columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    wti_df.to_excel(writer, sheet_name='WTI', index=False)
+                    print(f"   ✅ WTI: {len(wti_data)} records")
+                else:
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    empty_df.to_excel(writer, sheet_name='WTI', index=False)
+                    print("   ⚠️ WTI: No data for today")
+                
+                # Gasoline Stocks tab
+                if gasoline_stocks_data:
+                    stocks_df = pd.DataFrame(gasoline_stocks_data, 
+                                           columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'consensus', 'surprise', 'scraped_at'])
+                    stocks_df.to_excel(writer, sheet_name='Gasoline_Stocks', index=False)
+                    print(f"   ✅ Gasoline Stocks: {len(gasoline_stocks_data)} records")
+                else:
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'consensus', 'surprise', 'scraped_at'])
+                    empty_df.to_excel(writer, sheet_name='Gasoline_Stocks', index=False)
+                    print("   ⚠️ Gasoline Stocks: No data for today")
+                
+                # Refinery Runs tab
+                if refinery_runs_data:
+                    runs_df = pd.DataFrame(refinery_runs_data, 
+                                         columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    runs_df.to_excel(writer, sheet_name='Refinery_Runs', index=False)
+                    print(f"   ✅ Refinery Runs: {len(refinery_runs_data)} records")
+                else:
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    empty_df.to_excel(writer, sheet_name='Refinery_Runs', index=False)
+                    print("   ⚠️ Refinery Runs: No data for today")
+            
+            print(f"✅ Daily Excel export completed: {filename}")
+            return filename
+            
+        except Exception as e:
+            print(f"❌ Error exporting daily Excel: {e}")
+            return None
+    
+    def check_and_export_monthly(self):
+        """Check if it's the 1st of the month and export monthly Excel if so"""
+        now = datetime.now()
+        if now.day == 1:
+            print("📅 First day of month detected - starting monthly Excel export...")
+            self.export_monthly_excel()
+        else:
+            print(f"📅 Not first day of month (current day: {now.day}) - skipping monthly export")
+    
+    def export_monthly_excel(self):
+        """Export current month's data to Excel with 3 tabs"""
+        try:
+            print("📊 Exporting monthly data to Excel...")
+            
+            # Get current month
+            now = datetime.now()
+            current_month = now.replace(day=1).date()
+            
+            # Connect to database
+            conn = duckdb.connect(self.db_path)
+            
+            # Get data for each source for current month
+            gasbuddy_data = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, scraped_at
+                FROM gas_prices
+                WHERE source = 'gasbuddy_fuel_insights'
+                AND DATE(scraped_at) >= ?
+                ORDER BY scraped_at DESC
+            ''', [current_month]).fetchall()
+            
+            aaa_data = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, scraped_at
+                FROM gas_prices
+                WHERE source = 'aaa_gas_prices'
+                AND DATE(scraped_at) >= ?
+                ORDER BY scraped_at DESC
+            ''', [current_month]).fetchall()
+            
+            rbob_data = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, scraped_at
+                FROM gas_prices
+                WHERE source = 'marketwatch_rbob_futures'
+                AND DATE(scraped_at) >= ?
+                ORDER BY scraped_at DESC
+            ''', [current_month]).fetchall()
+            
+            wti_data = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, scraped_at
+                FROM gas_prices
+                WHERE source = 'marketwatch_wti_futures'
+                AND DATE(scraped_at) >= ?
+                ORDER BY scraped_at DESC
+            ''', [current_month]).fetchall()
+            
+            gasoline_stocks_data = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, consensus, surprise, scraped_at
+                FROM gas_prices
+                WHERE source = 'tradingeconomics_gasoline_stocks'
+                AND DATE(scraped_at) >= ?
+                ORDER BY scraped_at DESC
+            ''', [current_month]).fetchall()
+            
+            refinery_runs_data = conn.execute('''
+                SELECT price, timestamp, region, source, fuel_type, scraped_at
+                FROM gas_prices
+                WHERE source = 'tradingeconomics_refinery_runs'
+                AND DATE(scraped_at) >= ?
+                ORDER BY scraped_at DESC
+            ''', [current_month]).fetchall()
+            
+            conn.close()
+            
+            # Create Excel file with 6 tabs
+            filename = f"gas_prices_monthly_{now.strftime('%Y%m')}.xlsx"
+            
+            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+                # GasBuddy tab
+                if gasbuddy_data:
+                    gasbuddy_df = pd.DataFrame(gasbuddy_data, 
+                                             columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    gasbuddy_df.to_excel(writer, sheet_name='GasBuddy', index=False)
+                    print(f"   ✅ GasBuddy: {len(gasbuddy_data)} records")
+                else:
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    empty_df.to_excel(writer, sheet_name='GasBuddy', index=False)
+                    print("   ⚠️ GasBuddy: No data for this month")
+                
+                # AAA tab
+                if aaa_data:
+                    aaa_df = pd.DataFrame(aaa_data, 
+                                        columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    aaa_df.to_excel(writer, sheet_name='AAA', index=False)
+                    print(f"   ✅ AAA: {len(aaa_data)} records")
+                else:
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    empty_df.to_excel(writer, sheet_name='AAA', index=False)
+                    print("   ⚠️ AAA: No data for this month")
+                
+                # RBOB tab
+                if rbob_data:
+                    rbob_df = pd.DataFrame(rbob_data, 
+                                         columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    rbob_df.to_excel(writer, sheet_name='RBOB', index=False)
+                    print(f"   ✅ RBOB: {len(rbob_data)} records")
+                else:
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    empty_df.to_excel(writer, sheet_name='RBOB', index=False)
+                    print("   ⚠️ RBOB: No data for this month")
+                
+                # WTI tab
+                if wti_data:
+                    wti_df = pd.DataFrame(wti_data, 
+                                        columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    wti_df.to_excel(writer, sheet_name='WTI', index=False)
+                    print(f"   ✅ WTI: {len(wti_data)} records")
+                else:
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    empty_df.to_excel(writer, sheet_name='WTI', index=False)
+                    print("   ⚠️ WTI: No data for this month")
+                
+                # Gasoline Stocks tab
+                if gasoline_stocks_data:
+                    stocks_df = pd.DataFrame(gasoline_stocks_data, 
+                                           columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'consensus', 'surprise', 'scraped_at'])
+                    stocks_df.to_excel(writer, sheet_name='Gasoline_Stocks', index=False)
+                    print(f"   ✅ Gasoline Stocks: {len(gasoline_stocks_data)} records")
+                else:
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'consensus', 'surprise', 'scraped_at'])
+                    empty_df.to_excel(writer, sheet_name='Gasoline_Stocks', index=False)
+                    print("   ⚠️ Gasoline Stocks: No data for this month")
+                
+                # Refinery Runs tab
+                if refinery_runs_data:
+                    runs_df = pd.DataFrame(refinery_runs_data, 
+                                         columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    runs_df.to_excel(writer, sheet_name='Refinery_Runs', index=False)
+                    print(f"   ✅ Refinery Runs: {len(refinery_runs_data)} records")
+                else:
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'source', 'fuel_type', 'scraped_at'])
+                    empty_df.to_excel(writer, sheet_name='Refinery_Runs', index=False)
+                    print("   ⚠️ Refinery Runs: No data for this month")
+            
+            print(f"✅ Monthly Excel export completed: {filename}")
+            return filename
+            
+        except Exception as e:
+            print(f"❌ Error exporting monthly Excel: {e}")
+            return None
+    
+    def run_scheduled(self):
+        """Run the scraper on schedule"""
+        print("🚗 Hexa Source Gas Scraper - Scheduled Mode")
+        print("=" * 50)
+        print("📅 Schedule:")
+        print("   • GasBuddy: Every 10 minutes")
+        print("   • AAA: Daily at 12:01 AM Pacific")
+        print("   • RBOB & WTI: Every 2 hours (Mon 1AM EST - Fri 11PM EST)")
+        print("   • EIA Data (Gasoline Stocks & Refinery Runs): Daily at 11 AM EST")
+        print("   • Daily Excel Export: 5 PM EST")
+        print("   • Monthly Excel Export: 1st of month at 5 PM EST")
+        print("=" * 50)
+        
+        # Schedule GasBuddy every 10 minutes
+        schedule.every(10).minutes.do(self.run_gasbuddy_job)
+        
+        # Schedule AAA daily at 12:01 AM Pacific (3:01 AM Eastern)
+        schedule.every().day.at("03:01").do(self.run_aaa_job)
+        
+        # Schedule EIA data daily at 11 AM EST (4 PM UTC)
+        # Schedule EIA data scraping (daily at 10:35 AM EST = 3:35 PM UTC)
+        schedule.every().day.at("15:35").do(self.run_gasoline_stocks_job)
+        schedule.every().day.at("15:35").do(self.run_refinery_runs_job)
+        
+        # Schedule daily Excel export at 5 PM EST (10 PM UTC)
+        schedule.every().day.at("22:00").do(self.export_daily_excel)
+        
+        # Schedule monthly Excel export on the 1st of each month at 5 PM EST (10 PM UTC)
+        # Schedule monthly Excel export on 1st of month at 5 PM EST (10 PM UTC)
+        # Check daily at 10 PM UTC, and export if it's the 1st of the month
+        schedule.every().day.at("22:00").do(self.check_and_export_monthly)
+        
+        # Schedule RBOB and WTI every 2 hours during market hours
+        # Monday 1AM EST = Monday 6AM UTC, Friday 11PM EST = Saturday 4AM UTC
+        for hour in range(6, 24, 2):  # 6, 8, 10, 12, 14, 16, 18, 20, 22
+            schedule.every().monday.at(f"{hour:02d}:00").do(self.run_rbob_job)
+            schedule.every().monday.at(f"{hour:02d}:00").do(self.run_wti_job)
+            schedule.every().tuesday.at(f"{hour:02d}:00").do(self.run_rbob_job)
+            schedule.every().tuesday.at(f"{hour:02d}:00").do(self.run_wti_job)
+            schedule.every().wednesday.at(f"{hour:02d}:00").do(self.run_rbob_job)
+            schedule.every().wednesday.at(f"{hour:02d}:00").do(self.run_wti_job)
+            schedule.every().thursday.at(f"{hour:02d}:00").do(self.run_rbob_job)
+            schedule.every().thursday.at(f"{hour:02d}:00").do(self.run_wti_job)
+            schedule.every().friday.at(f"{hour:02d}:00").do(self.run_rbob_job)
+            schedule.every().friday.at(f"{hour:02d}:00").do(self.run_wti_job)
+        
+        # Add early morning and late night for Friday
+        schedule.every().friday.at("00:00").do(self.run_rbob_job)
+        schedule.every().friday.at("00:00").do(self.run_wti_job)
+        schedule.every().friday.at("02:00").do(self.run_rbob_job)
+        schedule.every().friday.at("02:00").do(self.run_wti_job)
+        schedule.every().friday.at("04:00").do(self.run_rbob_job)
+        schedule.every().friday.at("04:00").do(self.run_wti_job)
+        
+        print("✅ Scheduler started!")
+        print("Press Ctrl+C to stop")
+        
+        try:
+            while True:
+                schedule.run_pending()
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n🛑 Stopping scheduler...")
+
+def main():
+    """Main function to run the gas scraper"""
+    print("🚗 Hexa Source Gas Scraper - GasBuddy + AAA + RBOB + WTI + EIA Data")
+    print("=" * 50)
+    
+    # Create scraper instance
+    scraper = GasScraper(headless=True)
+    
+    try:
+        print("\n🚗 Gas Scraper Options:")
+        print("1. Run GasBuddy once immediately")
+        print("2. Run AAA once immediately")
+        print("3. Run RBOB once immediately")
+        print("4. Run WTI once immediately")
+        print("5. Run Gasoline Stocks once immediately")
+        print("6. Run Refinery Runs once immediately")
+        print("7. Run all sources once")
+        print("8. Start scheduled mode (GasBuddy every 10 min + AAA daily + RBOB & WTI every 2h + EIA daily)")
+        print("9. View latest data")
+        print("10. Export daily Excel")
+        print("11. Export monthly Excel")
+        print("12. Exit")
+        
+        choice = input("\nEnter your choice (1-12): ").strip()
+        
+        if choice == "1":
+            scraper.run_gasbuddy_job()
+        elif choice == "2":
+            scraper.run_aaa_job()
+        elif choice == "3":
+            scraper.run_rbob_job()
+        elif choice == "4":
+            scraper.run_wti_job()
+        elif choice == "5":
+            scraper.run_gasoline_stocks_job()
+        elif choice == "6":
+            scraper.run_refinery_runs_job()
+        elif choice == "7":
+            print("🔄 Running all sources...")
+            scraper.run_gasbuddy_job()
+            time.sleep(2)  # Small delay between jobs
+            scraper.run_aaa_job()
+            time.sleep(2)  # Small delay between jobs
+            scraper.run_rbob_job()
+            time.sleep(2)  # Small delay between jobs
+            scraper.run_wti_job()
+            time.sleep(2)  # Small delay between jobs
+            scraper.run_gasoline_stocks_job()
+            time.sleep(2)  # Small delay between jobs
+            scraper.run_refinery_runs_job()
+        elif choice == "8":
+            scraper.run_scheduled()
+        elif choice == "9":
+            latest_data = scraper.get_latest_prices(20)
+            if latest_data:
+                print("\n📊 Latest Gas Prices:")
+                for price, timestamp, region, source, fuel_type, scraped_at in latest_data:
+                    print(f"${price} - {timestamp} ({region}) - {source} - {fuel_type} - {scraped_at}")
+            else:
+                print("No data found in database")
+        elif choice == "10":
+            scraper.export_daily_excel()
+        elif choice == "11":
+            scraper.export_monthly_excel()
+        elif choice == "12":
+            print("Exiting...")
+        else:
+            print("Invalid choice. Exiting...")
+            
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+
+if __name__ == "__main__":
+    main()
