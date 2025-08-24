@@ -6,7 +6,7 @@ This script starts the gas price scraper in scheduled mode for Railway deploymen
 
 import os
 import sys
-from gas_scraper import GasPriceScraper
+from gas_scraper import GasScraper
 
 def main():
     print("🚀 Starting Gas Price Scraper in scheduled mode...")
@@ -18,7 +18,7 @@ def main():
         
         # Start the scheduler
         print("📅 Starting scheduler...")
-        scraper.start_scheduler()
+        scraper.run_scheduled()
         
     except KeyboardInterrupt:
         print("\n⏹️ Scraper stopped by user")
