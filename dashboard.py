@@ -112,6 +112,138 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def export_daily_excel():
+    """Export today's data to Excel with 6 tabs (one for each data source)"""
+    try:
+        # Create data folder if it doesn't exist
+        data_folder = "data"
+        if not os.path.exists(data_folder):
+            os.makedirs(data_folder)
+            print(f"Created folder: {data_folder}")
+        
+        # Get today's date for filename
+        today = datetime.now().strftime("%Y-%m-%d")
+        filename = f"{today} Gas Price Data.xlsx"
+        filepath = os.path.join(data_folder, filename)
+        
+        # Connect to database
+        conn = duckdb.connect('gas_prices.duckdb')
+        
+        # Get today's data for each source using DuckDB date functions
+        today_data = conn.execute('''
+            SELECT 
+                source,
+                fuel_type,
+                price,
+                timestamp,
+                region,
+                consensus,
+                surprise,
+                scraped_at
+            FROM gas_prices 
+            WHERE CAST(scraped_at AS DATE) = CAST(CURRENT_TIMESTAMP AS DATE)
+            ORDER BY source, scraped_at DESC
+        ''').fetchdf()
+        
+        conn.close()
+        
+        if today_data.empty:
+            print(f"No data found for today ({today})")
+            return False
+        
+        # Create Excel writer
+        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+            # Define source configurations for tabs
+            source_configs = [
+                {
+                    'source': 'gasbuddy_fuel_insights',
+                    'tab_name': 'GasBuddy',
+                    'display_name': 'GasBuddy National Average'
+                },
+                {
+                    'source': 'aaa_gas_prices',
+                    'tab_name': 'AAA',
+                    'display_name': 'AAA Gas National Average'
+                },
+                {
+                    'source': 'marketwatch_rbob_futures',
+                    'tab_name': 'RBOB',
+                    'display_name': 'RBOB Futures'
+                },
+                {
+                    'source': 'marketwatch_wti_futures',
+                    'tab_name': 'WTI',
+                    'display_name': 'WTI Futures'
+                },
+                {
+                    'source': 'tradingeconomics_gasoline_stocks',
+                    'tab_name': 'Gasoline_Stocks',
+                    'display_name': 'Gasoline Stocks Change'
+                },
+                {
+                    'source': 'tradingeconomics_refinery_runs',
+                    'tab_name': 'Refinery_Runs',
+                    'display_name': 'Refinery Runs Change'
+                }
+            ]
+            
+            # Create tab for each source
+            for config in source_configs:
+                source_data = today_data[today_data['source'] == config['source']]
+                
+                if not source_data.empty:
+                    # Select columns to display
+                    display_cols = ['price', 'timestamp', 'region', 'fuel_type', 'scraped_at']
+                    if 'consensus' in source_data.columns and 'surprise' in source_data.columns:
+                        display_cols.extend(['consensus', 'surprise'])
+                    
+                    # Reorder columns for better readability
+                    final_cols = []
+                    for col in display_cols:
+                        if col in source_data.columns:
+                            final_cols.append(col)
+                    
+                    # Write to Excel tab
+                    source_data[final_cols].to_excel(
+                        writer, 
+                        sheet_name=config['tab_name'], 
+                        index=False
+                    )
+                    
+                    # Get the worksheet to format it
+                    worksheet = writer.sheets[config['tab_name']]
+                    
+                    # Auto-adjust column widths
+                    for column in worksheet.columns:
+                        max_length = 0
+                        column_letter = column[0].column_letter
+                        for cell in column:
+                            try:
+                                if len(str(cell.value)) > max_length:
+                                    max_length = len(str(cell.value))
+                            except:
+                                pass
+                        adjusted_width = min(max_length + 2, 50)
+                        worksheet.column_dimensions[column_letter].width = adjusted_width
+                    
+                    print(f"Created tab: {config['tab_name']} with {len(source_data)} records")
+                else:
+                    # Create empty tab with headers if no data
+                    empty_df = pd.DataFrame(columns=['price', 'timestamp', 'region', 'fuel_type', 'scraped_at'])
+                    empty_df.to_excel(
+                        writer, 
+                        sheet_name=config['tab_name'], 
+                        index=False
+                    )
+                    print(f"Created empty tab: {config['tab_name']} (no data for today)")
+        
+        print(f"Daily Excel export completed: {filepath}")
+        return True
+        
+    except Exception as e:
+        print(f"Error exporting daily Excel: {e}")
+        return False
+
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_data():
     """Load data from DuckDB database"""
@@ -334,7 +466,7 @@ def main():
                     else:
                         value_display = f"${value:.3f}"
                         if previous_value is not None:
-                            previous_display = f"${previous_value:.3f}"
+                            previous_display = f"{previous_value:.3f}"
                         else:
                             previous_display = ""
                     
@@ -422,29 +554,53 @@ def main():
     
     st.markdown('</div>', unsafe_allow_html=True)
     
-    # Download CSV button for full database
+    # Data Export Section
     st.markdown("---")
-    st.subheader("Download Data")
+    st.subheader("Data Export")
     
-    if st.button("Download Full Database as CSV"):
-        try:
-            conn = duckdb.connect('gas_prices.duckdb')
-            all_data = conn.execute('''
-                SELECT source, price, timestamp, region, fuel_type, consensus, surprise, scraped_at
-                FROM gas_prices 
-                ORDER BY scraped_at DESC
-            ''').fetchdf()
-            conn.close()
-            
-            csv = all_data.to_csv(index=False)
-            st.download_button(
-                label="Download CSV",
-                data=csv,
-                file_name=f"gas_prices_database_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
-        except Exception as e:
-            st.error(f"Error downloading data: {e}")
+    # Create two columns for export buttons
+    export_col1, export_col2 = st.columns(2)
+    
+    with export_col1:
+        if st.button("Download Full Database as CSV"):
+            try:
+                conn = duckdb.connect('gas_prices.duckdb')
+                all_data = conn.execute('''
+                    SELECT source, price, timestamp, region, fuel_type, consensus, surprise, scraped_at
+                    FROM gas_prices 
+                    ORDER BY scraped_at DESC
+                ''').fetchdf()
+                conn.close()
+                
+                csv = all_data.to_csv(index=False)
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name=f"gas_prices_database_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+            except Exception as e:
+                st.error(f"Error downloading data: {e}")
+    
+    with export_col2:
+        if st.button("Export Today's Data to Excel"):
+            try:
+                success = export_daily_excel()
+                if success:
+                    st.success("Daily Excel export completed! Check the 'data' folder.")
+                    
+                    # Show the file path
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    filename = f"{today} Gas Price Data.xlsx"
+                    filepath = os.path.join("data", filename)
+                    
+                    if os.path.exists(filepath):
+                        file_size = os.path.getsize(filepath) / 1024  # KB
+                        st.info(f"File saved: {filepath} ({file_size:.1f} KB)")
+                else:
+                    st.error("Failed to export daily Excel file.")
+            except Exception as e:
+                st.error(f"Error exporting Excel: {e}")
     
     # Summary metrics
     st.markdown("---")

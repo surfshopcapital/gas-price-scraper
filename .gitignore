@@ -3,6 +3,11 @@
 *.db
 *.sqlite
 
+# Data exports
+data/
+*.xlsx
+*.xls
+
 # Python
 __pycache__/
 *.py[cod]
@@ -53,10 +58,6 @@ Thumbs.db
 *.log
 logs/
 
-# Excel exports
-*.xlsx
-*.xls
-
 # CSV exports
 *.csv
 
@@ -98,8 +99,3 @@ celerybeat.pid
 
 # mkdocs documentation
 /site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
