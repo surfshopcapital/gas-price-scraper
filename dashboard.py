@@ -22,16 +22,50 @@ st.markdown("""
         color: #1f77b4;
         text-align: center;
         margin-bottom: 2rem;
+        text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
     }
     .metric-card {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        padding: 1.2rem;
+        border-radius: 0.8rem;
         border-left: 4px solid #1f77b4;
-        height: 200px;
+        height: 220px;
         display: flex;
         flex-direction: column;
         justify-content: space-between;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        transition: transform 0.2s ease;
+    }
+    .metric-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 12px rgba(0,0,0,0.15);
+    }
+    .metric-card h4 {
+        font-size: 0.9rem;
+        margin-bottom: 0.8rem;
+        color: #2c3e50;
+        line-height: 1.2;
+    }
+    .metric-card p {
+        margin: 0.3rem 0;
+        font-size: 0.85rem;
+        line-height: 1.3;
+    }
+    .metric-card .value-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.5rem;
+    }
+    .metric-card .current-value {
+        font-weight: bold;
+        color: #1f77b4;
+        font-size: 1.1rem;
+    }
+    .metric-card .previous-value {
+        font-size: 0.8rem;
+        color: #6c757d;
+        font-style: italic;
     }
     .data-source {
         background-color: #ffffff;
@@ -39,6 +73,41 @@ st.markdown("""
         border-radius: 0.5rem;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         margin-bottom: 1rem;
+    }
+    .stApp {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    .main .block-container {
+        background: rgba(255, 255, 255, 0.95);
+        border-radius: 1rem;
+        padding: 2rem;
+        margin: 1rem;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+        backdrop-filter: blur(10px);
+    }
+    .update-schedule {
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        border-radius: 0.8rem;
+        padding: 1.5rem;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .update-schedule h3 {
+        color: #2c3e50;
+        margin-bottom: 1rem;
+    }
+    .update-metric {
+        text-align: center;
+    }
+    .update-metric .metric-label {
+        font-size: 1.1rem;
+        font-weight: bold;
+        color: #1f77b4;
+        margin-bottom: 0.5rem;
+    }
+    .update-metric .metric-value {
+        font-size: 0.85rem;
+        color: #6c757d;
+        line-height: 1.3;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -50,6 +119,7 @@ def load_data():
         conn = duckdb.connect('gas_prices.duckdb')
         
         # Get latest data for each source
+        # Special handling for AAA to get "Current" instead of "Yesterday"
         latest_data = conn.execute('''
             SELECT 
                 source,
@@ -61,12 +131,36 @@ def load_data():
                 surprise,
                 scraped_at
             FROM gas_prices 
-            WHERE scraped_at = (
+            WHERE (source != 'aaa_gas_prices' AND scraped_at = (
                 SELECT MAX(scraped_at) 
                 FROM gas_prices p2 
                 WHERE p2.source = gas_prices.source
-            )
+            ))
+            OR (source = 'aaa_gas_prices' AND timestamp LIKE '%Current%')
             ORDER BY scraped_at DESC
+        ''').fetchdf()
+        
+        # Get previous data for each source (second most recent)
+        previous_data = conn.execute('''
+            SELECT 
+                source,
+                price,
+                timestamp,
+                consensus,
+                surprise,
+                scraped_at
+            FROM gas_prices p1
+            WHERE (source != 'aaa_gas_prices' AND scraped_at = (
+                SELECT MAX(scraped_at) 
+                FROM gas_prices p2 
+                WHERE p2.source = p1.source 
+                AND p2.scraped_at < (
+                    SELECT MAX(scraped_at) 
+                    FROM gas_prices p3 
+                    WHERE p3.source = p1.source
+                )
+            ))
+            OR (source = 'aaa_gas_prices' AND timestamp LIKE '%Yesterday%')
         ''').fetchdf()
         
         # Get historical data for charts
@@ -86,10 +180,10 @@ def load_data():
         ''').fetchdf()
         
         conn.close()
-        return latest_data, historical_data
+        return latest_data, previous_data, historical_data
     except Exception as e:
         st.error(f"Error loading data: {e}")
-        return None, None
+        return None, None, None
 
 def get_next_update_info():
     """Get information about next scheduled updates"""
@@ -128,7 +222,7 @@ def main():
     st.markdown('<h1 class="main-header">Gas Price Dashboard</h1>', unsafe_allow_html=True)
     
     # Load data
-    latest_data, historical_data = load_data()
+    latest_data, previous_data, historical_data = load_data()
     
     if latest_data is None:
         st.error("Failed to load data. Please check if the database exists and contains data.")
@@ -193,6 +287,8 @@ def main():
     # Display each card
     for idx, config in enumerate(source_configs):
         source_data = latest_data[latest_data['source'] == config['source']]
+        previous_source_data = previous_data[previous_data['source'] == config['source']]
+        
         if not source_data.empty:
             row = source_data.iloc[0]
             with cols[idx]:
@@ -207,20 +303,51 @@ def main():
                         value = row['price']
                         value_label = "Value"
                     
+                    # Get previous value
+                    previous_value = None
+                    if not previous_source_data.empty:
+                        prev_row = previous_source_data.iloc[0]
+                        if config['value_field'] == 'surprise' and 'surprise' in prev_row and not pd.isna(prev_row['surprise']):
+                            previous_value = prev_row['surprise']
+                        else:
+                            previous_value = prev_row['price']
+                    
                     # Format the value display
                     if config['source'] == 'tradingeconomics_gasoline_stocks':
                         value_display = f"{value:.3f}M"
+                        if previous_value is not None:
+                            previous_display = f"{previous_value:.3f}M"
+                        else:
+                            previous_display = ""
                     elif config['source'] == 'tradingeconomics_refinery_runs':
                         value_display = f"{value:.3f}M"
+                        if previous_value is not None:
+                            previous_display = f"{previous_value:.3f}M"
+                        else:
+                            previous_display = ""
                     elif config['source'] in ['marketwatch_wti_futures']:
                         value_display = f"${value:.2f}"
+                        if previous_value is not None:
+                            previous_display = f"${previous_value:.2f}"
+                        else:
+                            previous_display = ""
                     else:
                         value_display = f"${value:.3f}"
+                        if previous_value is not None:
+                            previous_display = f"${previous_value:.3f}"
+                        else:
+                            previous_display = ""
                     
                     st.markdown(f"""
                     <div class="metric-card">
                         <h4>{config['name']}</h4>
-                        <p><strong>{value_label}:</strong> {value_display}</p>
+                        <div class="value-row">
+                            <span><strong>{value_label}:</strong></span>
+                            <span class="current-value">{value_display}</span>
+                        </div>
+                        <div class="value-row">
+                            <span class="previous-value">Previous: {previous_display if previous_display else ''}</span>
+                        </div>
                         <p><strong>Date:</strong> {row['timestamp']}</p>
                         <p><strong>Updated:</strong> {updated_time}</p>
                     </div>
@@ -229,7 +356,13 @@ def main():
                     st.markdown(f"""
                     <div class="metric-card">
                         <h4>{config['name']}</h4>
-                        <p><strong>Value:</strong> Error</p>
+                        <div class="value-row">
+                            <span><strong>Value:</strong></span>
+                            <span class="current-value">Error</span>
+                        </div>
+                        <div class="value-row">
+                            <span class="previous-value">Previous: </span>
+                        </div>
                         <p><strong>Date:</strong> Error</p>
                         <p><strong>Updated:</strong> Error</p>
                     </div>
@@ -239,7 +372,13 @@ def main():
                 st.markdown(f"""
                 <div class="metric-card">
                     <h4>{config['name']}</h4>
-                    <p><strong>Value:</strong> No data</p>
+                    <div class="value-row">
+                        <span><strong>Value:</strong></span>
+                        <span class="current-value">No data</span>
+                    </div>
+                    <div class="value-row">
+                        <span class="previous-value">Previous: </span>
+                    </div>
                     <p><strong>Date:</strong> No data</p>
                     <p><strong>Updated:</strong> No data</p>
                 </div>
@@ -247,6 +386,7 @@ def main():
     
     # Next Update Information
     st.markdown("---")
+    st.markdown('<div class="update-schedule">', unsafe_allow_html=True)
     st.subheader("Next Update Schedule")
     
     next_updates = get_next_update_info()
@@ -254,19 +394,33 @@ def main():
     update_cols = st.columns(4)
     
     with update_cols[0]:
-        st.metric("GasBuddy", f"Every 10 min\nNext: {next_updates['gasbuddy'].strftime('%H:%M') if isinstance(next_updates['gasbuddy'], datetime) else next_updates['gasbuddy']}")
+        st.markdown('<div class="update-metric">', unsafe_allow_html=True)
+        st.markdown('<div class="metric-label">GasBuddy</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-value">Every 10 min<br>Next: {next_updates["gasbuddy"].strftime("%H:%M") if isinstance(next_updates["gasbuddy"], datetime) else next_updates["gasbuddy"]}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
     
     with update_cols[1]:
-        st.metric("AAA", f"Daily 12:01 AM PT\nNext: {next_updates['aaa'].strftime('%m/%d %H:%M') if isinstance(next_updates['aaa'], datetime) else next_updates['aaa']}")
+        st.markdown('<div class="update-metric">', unsafe_allow_html=True)
+        st.markdown('<div class="metric-label">AAA</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-value">Daily 12:01 AM PT<br>Next: {next_updates["aaa"].strftime("%m/%d %H:%M") if isinstance(next_updates["aaa"], datetime) else next_updates["aaa"]}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
     
     with update_cols[2]:
+        st.markdown('<div class="update-metric">', unsafe_allow_html=True)
+        st.markdown('<div class="metric-label">RBOB & WTI</div>', unsafe_allow_html=True)
         if isinstance(next_updates['rbob_wti'], datetime):
-            st.metric("RBOB & WTI", f"Every 2h Mon-Fri\nNext: {next_updates['rbob_wti'].strftime('%H:%M')}")
+            st.markdown(f'<div class="metric-value">Every 2h Mon-Fri<br>Next: {next_updates["rbob_wti"].strftime("%H:%M")}</div>', unsafe_allow_html=True)
         else:
-            st.metric("RBOB & WTI", next_updates['rbob_wti'])
+            st.markdown(f'<div class="metric-value">{next_updates["rbob_wti"]}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
     
     with update_cols[3]:
-        st.metric("EIA Data", f"Daily 10:35 AM EST\nNext: {next_updates['eia'].strftime('%m/%d %H:%M') if isinstance(next_updates['eia'], datetime) else next_updates['eia']}")
+        st.markdown('<div class="update-metric">', unsafe_allow_html=True)
+        st.markdown('<div class="metric-label">EIA Data</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-value">Daily 10:35 AM EST<br>Next: {next_updates["eia"].strftime("%m/%d %H:%M") if isinstance(next_updates["eia"], datetime) else next_updates["eia"]}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
     
     # Download CSV button for full database
     st.markdown("---")
