@@ -1148,18 +1148,34 @@ class GasScraper:
         else:
             print("❌ Failed to scrape Refinery Runs data")
     
+    def run_daily_backup(self):
+        """Run daily database backup"""
+        print(f"\n--- Starting daily database backup at {datetime.now()} ---")
+        
+        try:
+            # Import and run backup script
+            from backup_database import main as backup_main
+            backup_main()
+            print("✅ Daily backup completed successfully")
+        except Exception as e:
+            print(f"❌ Daily backup failed: {e}")
+    
     def get_latest_prices(self, limit=20):
         """Retrieve the latest gas prices from the database"""
         try:
-            conn = duckdb.connect(self.db_path)
+            database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:QKmnqfjnamSWVXIgeEZZctczGSYOZiKw@switchback.proxy.rlwy.net:51447/railway')
+            conn = psycopg2.connect(database_url)
+            cursor = conn.cursor()
             
-            results = conn.execute('''
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 ORDER BY scraped_at DESC
-                LIMIT ?
-            ''', [limit]).fetchall()
+                LIMIT %s
+            ''', (limit,))
             
+            results = cursor.fetchall()
+            cursor.close()
             conn.close()
             return results
             
@@ -1469,6 +1485,7 @@ class GasScraper:
         print("   • EIA Data (Gasoline Stocks & Refinery Runs): Daily at 11 AM EST")
         print("   • Daily Excel Export: 5 PM EST")
         print("   • Monthly Excel Export: 1st of month at 5 PM EST")
+        print("   • Daily Database Backup: 6 PM EST")
         print("=" * 50)
         
         # Schedule GasBuddy every 15 minutes
@@ -1489,6 +1506,9 @@ class GasScraper:
         # Schedule monthly Excel export on 1st of month at 5 PM EST (10 PM UTC)
         # Check daily at 10 PM UTC, and export if it's the 1st of the month
         schedule.every().day.at("22:00").do(self.check_and_export_monthly)
+        
+        # Schedule daily database backup at 11 PM UTC (6 PM EST)
+        schedule.every().day.at("23:00").do(self.run_daily_backup)
         
         # Schedule RBOB and WTI every 2 hours during market hours
         # Monday 1AM EST = Monday 6AM UTC, Friday 11PM EST = Saturday 4AM UTC
