@@ -324,7 +324,7 @@ def load_data():
                 surprise,
                 scraped_at
             FROM gas_prices 
-            WHERE scraped_at >= CURRENT_DATE - INTERVAL 30 DAY
+            WHERE scraped_at >= CURRENT_DATE - INTERVAL '30 days'
             ORDER BY scraped_at ASC
         ''', conn)
         
