@@ -13,7 +13,15 @@ def main():
     print("=" * 50)
     
     try:
+        # Test PostgreSQL connection first
+        print("🔌 Testing database connection...")
+        from test_postgresql import test_connection
+        if not test_connection():
+            print("❌ Database connection failed. Cannot start scraper.")
+            sys.exit(1)
+        
         # Create scraper instance
+        print("🔧 Creating scraper instance...")
         scraper = GasScraper()
         
         # Start the scheduler

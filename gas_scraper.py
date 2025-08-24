@@ -1062,8 +1062,8 @@ class GasScraper:
                 
                 # Insert the data with auto-incrementing ID (PostgreSQL uses SERIAL)
                 cursor.execute('''
-                    INSERT INTO gas_prices (price, timestamp, region, source, fuel_type, consensus, surprise)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO gas_prices (price, timestamp, region, source, fuel_type, consensus, surprise, scraped_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ''', (gas_data['price'], gas_data['timestamp'], gas_data['region'], gas_data['source'], gas_data['fuel_type'], consensus, surprise))
                 
                 saved_count += 1
