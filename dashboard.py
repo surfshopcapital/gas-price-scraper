@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import duckdb
+import psycopg2
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
@@ -141,10 +141,11 @@ def export_daily_excel():
         filepath = os.path.join(data_folder, filename)
         
         # Connect to database
-        conn = duckdb.connect('gas_prices.duckdb')
+        database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:QKmnqfjnamSWVXIgeEZZctczGSYOZiKw@switchback.proxy.rlwy.net:51447/railway')
+        conn = psycopg2.connect(database_url)
         
-        # Get today's data for each source using DuckDB date functions
-        today_data = conn.execute('''
+        # Get today's data for each source using PostgreSQL date functions
+        today_data = pd.read_sql('''
             SELECT 
                 source,
                 fuel_type,
@@ -155,9 +156,9 @@ def export_daily_excel():
                 surprise,
                 scraped_at
             FROM gas_prices 
-            WHERE CAST(scraped_at AS DATE) = CAST(CURRENT_TIMESTAMP AS DATE)
+            WHERE DATE(scraped_at) = CURRENT_DATE
             ORDER BY source, scraped_at DESC
-        ''').fetchdf()
+        ''', conn)
         
         conn.close()
         
@@ -260,13 +261,16 @@ def export_daily_excel():
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_data():
-    """Load data from DuckDB database"""
+    """Load data from PostgreSQL database"""
     try:
-        conn = duckdb.connect('gas_prices.duckdb')
+        # Get database connection from environment variables
+        database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:QKmnqfjnamSWVXIgeEZZctczGSYOZiKw@switchback.proxy.rlwy.net:51447/railway')
+        
+        conn = psycopg2.connect(database_url)
         
         # Get latest data for each source
         # Special handling for AAA to get "Current" data only
-        latest_data = conn.execute('''
+        latest_data = pd.read_sql('''
             SELECT 
                 source,
                 fuel_type,
@@ -284,10 +288,10 @@ def load_data():
             ))
             OR (source = 'aaa_gas_prices' AND timestamp LIKE '%Current%')
             ORDER BY scraped_at DESC
-        ''').fetchdf()
+        ''', conn)
         
         # Get previous data for each source (second most recent)
-        previous_data = conn.execute('''
+        previous_data = pd.read_sql('''
             SELECT 
                 source,
                 price,
@@ -306,10 +310,10 @@ def load_data():
                     WHERE p3.source = p1.source
                 )
             )
-        ''').fetchdf()
+        ''', conn)
         
         # Get historical data for charts
-        historical_data = conn.execute('''
+        historical_data = pd.read_sql('''
             SELECT 
                 source,
                 fuel_type,
@@ -322,7 +326,7 @@ def load_data():
             FROM gas_prices 
             WHERE scraped_at >= CURRENT_DATE - INTERVAL 30 DAY
             ORDER BY scraped_at ASC
-        ''').fetchdf()
+        ''', conn)
         
         conn.close()
         return latest_data, previous_data, historical_data
@@ -578,12 +582,13 @@ def main():
     with export_col1:
         if st.button("Download Full Database as CSV"):
             try:
-                conn = duckdb.connect('gas_prices.duckdb')
-                all_data = conn.execute('''
+                database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:QKmnqfjnamSWVXIgeEZZctczGSYOZiKw@switchback.proxy.rlwy.net:51447/railway')
+                conn = psycopg2.connect(database_url)
+                all_data = pd.read_sql('''
                     SELECT source, price, timestamp, region, fuel_type, consensus, surprise, scraped_at
                     FROM gas_prices 
                     ORDER BY scraped_at DESC
-                ''').fetchdf()
+                ''', conn)
                 conn.close()
                 
                 csv = all_data.to_csv(index=False)
@@ -632,7 +637,17 @@ def main():
         st.metric("Total Records", len(historical_data))
     
     with col3:
-        st.metric("Database Size", f"{os.path.getsize('gas_prices.duckdb') / 1024:.1f} KB")
+        try:
+            database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:QKmnqfjnamSWVXIgeEZZctczGSYOZiKw@switchback.proxy.rlwy.net:51447/railway')
+            conn = psycopg2.connect(database_url)
+            cursor = conn.cursor()
+            cursor.execute("SELECT pg_size_pretty(pg_database_size(current_database()))")
+            db_size = cursor.fetchone()[0]
+            cursor.close()
+            conn.close()
+            st.metric("Database Size", db_size)
+        except:
+            st.metric("Database Size", "Unknown")
     
     with col4:
         try:
