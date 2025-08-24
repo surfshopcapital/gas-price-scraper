@@ -14,7 +14,7 @@ def main():
     
     try:
         # Create scraper instance
-        scraper = GasPriceScraper()
+        scraper = GasScraper()
         
         # Start the scheduler
         print("📅 Starting scheduler...")
