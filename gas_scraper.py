@@ -25,37 +25,22 @@ class GasScraper:
         self.init_database()
         
     def init_database(self):
-        """Initialize DuckDB database with required tables"""
+        """Initialize PostgreSQL database connection (table creation handled by setup_database.py)"""
         try:
-            # Connect to DuckDB (creates file if it doesn't exist)
-            conn = duckdb.connect(self.db_path)
+            # For Railway deployment, the table is already created by setup_database.py
+            # Just verify we can connect to PostgreSQL
+            database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:QKmnqfjnamSWVXIgeEZZctczGSYOZiKw@switchback.proxy.rlwy.net:51447/railway')
+            conn = psycopg2.connect(database_url)
+            cursor = conn.cursor()
             
-            # Check if table exists, create only if it doesn't
-            table_exists = conn.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'gas_prices'").fetchone()[0]
-            if table_exists == 0:
-                print("   📊 Creating new gas_prices table...")
-            else:
-                print("   📊 Using existing gas_prices table...")
-                conn.close()
-                return
+            # Simple test query to verify connection
+            cursor.execute("SELECT COUNT(*) FROM gas_prices")
+            count = cursor.fetchone()[0]
+            print(f"✅ Connected to PostgreSQL database. Found {count} existing records.")
             
-            # Create table with correct DuckDB syntax and auto-increment
-            conn.execute('''
-                CREATE TABLE gas_prices (
-                    id BIGINT PRIMARY KEY,
-                    price DOUBLE NOT NULL,
-                    timestamp VARCHAR NOT NULL,
-                    region VARCHAR NOT NULL,
-                    source VARCHAR NOT NULL,
-                    fuel_type VARCHAR NOT NULL,
-                    consensus DOUBLE,
-                    surprise DOUBLE,
-                    scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
+            # Table already exists in PostgreSQL
             
-            # Create sequence for auto-incrementing ID
-            conn.execute("CREATE SEQUENCE IF NOT EXISTS gas_prices_id_seq START 1")
+            # PostgreSQL uses SERIAL for auto-incrementing
             
             # Add consensus and surprise columns if they don't exist (for existing tables)
             try:
@@ -1160,6 +1145,27 @@ class GasScraper:
         except Exception as e:
             print(f"❌ Daily backup failed: {e}")
     
+    def run_all_sources_once(self):
+        """Run all data sources once immediately"""
+        print(f"\n--- Running all sources once at {datetime.now()} ---")
+        
+        try:
+            print("🔄 Running all sources...")
+            self.run_gasbuddy_job()
+            time.sleep(2)  # Small delay between jobs
+            self.run_aaa_job()
+            time.sleep(2)  # Small delay between jobs
+            self.run_rbob_job()
+            time.sleep(2)  # Small delay between jobs
+            self.run_wti_job()
+            time.sleep(2)  # Small delay between jobs
+            self.run_gasoline_stocks_job()
+            time.sleep(2)  # Small delay between jobs
+            self.run_refinery_runs_job()
+            print("✅ All sources completed successfully!")
+        except Exception as e:
+            print(f"❌ Error running all sources: {e}")
+    
     def get_latest_prices(self, limit=20):
         """Retrieve the latest gas prices from the database"""
         try:
@@ -1534,6 +1540,11 @@ class GasScraper:
         
         print("✅ Scheduler started!")
         print("Press Ctrl+C to stop")
+        
+        # Run all sources once immediately when scheduler starts
+        print("\n🚀 Running all sources once immediately...")
+        self.run_all_sources_once()
+        print("✅ Initial run completed! Now continuing with scheduled jobs...")
         
         try:
             while True:
