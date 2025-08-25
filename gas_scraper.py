@@ -1890,51 +1890,34 @@ class GasScraper:
             print(f"❌ Daily backup failed: {e}")
     
     def run_all_sources_once(self):
-        """Run all data sources once immediately using single persistent driver"""
+        """Run all data sources once immediately using fresh driver for each job"""
         print(f"\n--- Running all sources once at {datetime.now()} ---")
         
         try:
-            print("🔄 Running all sources with single persistent driver...")
+            print("🔄 Running all sources with fresh driver for each job...")
             
-            # Setup single Chrome driver for all jobs
-            if not self.setup_chrome_driver():
-                print("❌ Failed to setup Chrome driver")
-                return
+            # Run all jobs using fresh drivers (our new strategy)
+            self.run_gasbuddy_job()
+            time.sleep(2)  # Short delay between jobs
             
-            print("✅ Single Chrome driver established - will reuse for all jobs")
+            self.run_aaa_job()
+            time.sleep(2)  # Short delay between jobs
             
-            # Run all jobs using the same driver
-            self.run_gasbuddy_job_with_driver(self.driver)
-            time.sleep(3)  # Short delay between jobs
+            self.run_rbob_job()
+            time.sleep(2)  # Short delay between jobs
             
-            self.run_aaa_job_with_driver(self.driver)
-            time.sleep(3)  # Short delay between jobs
+            self.run_wti_job()
+            time.sleep(2)  # Short delay between jobs
             
-            self.run_rbob_job_with_driver(self.driver)
-            time.sleep(3)  # Short delay between jobs
+            self.run_gasoline_stocks_job()
+            time.sleep(2)  # Short delay between jobs
             
-            self.run_wti_job_with_driver(self.driver)
-            time.sleep(3)  # Short delay between jobs
+            self.run_refinery_runs_job()
             
-            self.run_gasoline_stocks_job_with_driver(self.driver)
-            time.sleep(3)  # Short delay between jobs
-            
-            self.run_refinery_runs_job_with_driver(self.driver)
-            
-            print("✅ All sources completed successfully with single driver!")
+            print("✅ All sources completed successfully with fresh drivers!")
             
         except Exception as e:
             print(f"❌ Error running all sources: {e}")
-        finally:
-            # Only quit the driver at the very end
-            if self.driver:
-                print("🔒 Closing persistent Chrome driver...")
-                try:
-                    self.driver.quit()
-                except Exception as e:
-                    print(f"⚠️ Warning during driver cleanup: {e}")
-                self.driver = None
-                self.cleanup_chrome_processes()
     
     def get_latest_prices(self, limit=20):
         """Retrieve the latest gas prices from the database"""
