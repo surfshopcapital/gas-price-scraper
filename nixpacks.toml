@@ -1,31 +1,11 @@
 [phases.setup]
 nixPkgs = [
-  "python311",
+  "python312",
   "postgresql_16.dev",
   "gcc",
-  "chromium",
-  "chromedriver",
   "coreutils",
   "findutils",
-  "glibc",
-  "nss",
-  "fontconfig",
-  "freetype",
-  "mesa",
-  "xorg.libX11",
-  "xorg.libXcomposite",
-  "xorg.libXrandr",
-  "xorg.libXi",
-  "xorg.libXcursor",
-  "xorg.libXdamage",
-  "xorg.libXext",
-  "xorg.libXfixes",
-  "gtk3",
-  "pango",
-  "cairo",
-  "alsa-lib",
-  "cups",
-  "dbus"
+  "glibc"
 ]
 
 [phases.install]
