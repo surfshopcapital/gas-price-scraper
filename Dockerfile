@@ -1,13 +1,23 @@
-FROM python:3.12-slim
+FROM ubuntu:22.04
 
-# Install system dependencies that Playwright needs
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python and system dependencies
 RUN apt-get update && apt-get install -y \
+    python3.12 \
+    python3.12-pip \
+    python3.12-venv \
     wget \
     gnupg \
     ca-certificates \
     procps \
     libxss1 \
     && rm -rf /var/lib/apt/lists/*
+
+# Create symlinks for python and pip
+RUN ln -s /usr/bin/python3.12 /usr/bin/python
+RUN ln -s /usr/bin/pip3.12 /usr/bin/pip
 
 # Set working directory
 WORKDIR /app
