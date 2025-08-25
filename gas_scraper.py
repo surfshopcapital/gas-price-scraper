@@ -467,59 +467,46 @@ class GasScraper:
                 # Store reference to driver
                 driver = self.driver
                 
-                # Navigate to AAA with robust retry logic
+                # Navigate to AAA with simplified approach
                 target_url = "https://gasprices.aaa.com/"
                 print(f"🌐 Navigating to: {target_url}")
 
-                # Robust navigation with retry and driver recreation
-                navigation_success = False
-                for nav_attempt in range(3):
-                    try:
-                        print(f"   �� Navigation attempt {nav_attempt + 1}/3...")
+                try:
+                    # Simple navigation with longer wait
+                    driver.get(target_url)
+                    print("   ✅ Navigation initiated")
+                    
+                    # Wait longer for page to load (DevTools issues often happen during loading)
+                    time.sleep(15)
+                    
+                    # Check if navigation was successful
+                    if "gasprices.aaa.com" in driver.current_url:
+                        print("   ✅ Navigation successful")
+                    else:
+                        print(f"   ⚠️ Navigation redirected to: {driver.current_url}")
                         
-                        # Try to navigate
-                        driver.get(target_url)
-                        
-                        # Wait for page to load
-                        time.sleep(8)
-                        
-                        # Check if navigation was successful
-                        if "gasprices.aaa.com" in driver.current_url:
-                            navigation_success = True
-                            print("   ✅ Navigation successful")
-                            break
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if any(keyword in error_msg for keyword in ["disconnected", "cannot determine loading status", "unable to receive message"]):
+                        print(f"   ⚠️ DevTools disconnection during navigation: {e}")
+                        if attempt < max_retries - 1:
+                            print("   🔄 Will retry with fresh driver...")
+                            time.sleep(5)
+                            continue
                         else:
-                            print(f"   ⚠️ Navigation redirected to: {driver.current_url}")
-                            
-                    except Exception as e:
-                        error_msg = str(e).lower()
-                        if any(keyword in error_msg for keyword in ["disconnected", "cannot determine loading status", "unable to receive message"]):
-                            print(f"   ⚠️ Navigation failed due to DevTools disconnection (attempt {nav_attempt + 1}): {e}")
-                            
-                            if nav_attempt < 2:
-                                print("   🔄 Recreating driver and retrying...")
-                                try:
-                                    driver.quit()
-                                except:
-                                    pass
-                                
-                                # Create fresh driver
-                                if not self.setup_chrome_driver():
-                                    print("   ❌ Failed to recreate Chrome driver")
-                                    return None
-                                driver = self.driver
-                                time.sleep(3)
-                                continue
-                            else:
-                                print("   ❌ Max navigation retries reached")
-                                return None
+                            print("   ❌ Max retries reached")
+                            return None
+                    else:
+                        print(f"   ⚠️ Navigation error: {e}")
+                        if attempt < max_retries - 1:
+                            print("   🔄 Will retry...")
+                            time.sleep(5)
+                            continue
                         else:
-                            print(f"   ⚠️ Navigation error: {e}")
-                            break
+                            print("   ❌ Max retries reached")
+                            return None
 
-                if not navigation_success:
-                    print("   ❌ Navigation failed after all attempts")
-                    return None
+
 
                 
 
