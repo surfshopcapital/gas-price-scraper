@@ -40,8 +40,8 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 ENV NONINTERACTIVE=1
 
-# Expose port (if needed)
-EXPOSE 8000
+# Railway will set PORT environment variable
+# No need to hardcode port exposure
 
 # Start the application
 CMD ["python", "run_scraper.py"]
