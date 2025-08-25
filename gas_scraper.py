@@ -124,6 +124,49 @@ class GasScraper:
             try:
                 print("   🔍 Looking for Chrome binary...")
                 
+                # Debug: Check what's actually in the system
+                print("   🔍 Debugging system paths...")
+                
+                # Check PATH and common directories
+                try:
+                    result = subprocess.run(['echo', '$PATH'], capture_output=True, text=True, shell=True)
+                    print(f"   📍 PATH: {result.stdout.strip()}")
+                except:
+                    print("   📍 Could not check PATH")
+                
+                # Check what's in /usr/bin
+                try:
+                    result = subprocess.run(['ls', '-la', '/usr/bin/'], capture_output=True, text=True)
+                    chrome_files = [line for line in result.stdout.split('\n') if 'chrome' in line.lower() or 'chromium' in line.lower()]
+                    if chrome_files:
+                        print(f"   📍 Chrome files in /usr/bin: {chrome_files}")
+                    else:
+                        print("   📍 No Chrome files found in /usr/bin")
+                except:
+                    print("   📍 Could not check /usr/bin")
+                
+                # Check nix store for chromium
+                try:
+                    result = subprocess.run(['find', '/nix/store', '-name', 'chromium', '-type', 'f'], capture_output=True, text=True)
+                    if result.stdout.strip():
+                        chromium_paths = result.stdout.strip().split('\n')
+                        print(f"   📍 Found chromium in nix store: {chromium_paths}")
+                    else:
+                        print("   📍 No chromium found in nix store")
+                except:
+                    print("   📍 Could not search nix store")
+                
+                # Check nix store for chromedriver
+                try:
+                    result = subprocess.run(['find', '/nix/store', '-name', 'chromedriver', '-type', 'f'], capture_output=True, text=True)
+                    if result.stdout.strip():
+                        chromedriver_paths = result.stdout.strip().split('\n')
+                        print(f"   📍 Found chromedriver in nix store: {chromedriver_paths}")
+                    else:
+                        print("   📍 No chromedriver found in nix store")
+                except:
+                    print("   📍 Could not search nix store")
+                
                 # Common Chrome/Chromium paths in Railway/nixpacks environment
                 chrome_paths = [
                     "/nix/store/*/chromium/bin/chromium",
@@ -142,6 +185,7 @@ class GasScraper:
                     if '*' in chrome_path:
                         # Handle wildcard paths (nixpacks)
                         expanded_paths = glob.glob(chrome_path)
+                        print(f"   🔍 Expanded path '{chrome_path}' to: {expanded_paths}")
                         for expanded_path in expanded_paths:
                             if subprocess.run(['test', '-f', expanded_path], capture_output=True).returncode == 0:
                                 options.binary_location = expanded_path
