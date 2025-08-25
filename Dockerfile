@@ -15,7 +15,8 @@ RUN apt-get update && apt-get install -y \
     libxss1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create symlinks for python and pip
+# Create symlinks for python and pip (remove existing first)
+RUN rm -f /usr/bin/python /usr/bin/pip
 RUN ln -s /usr/bin/python3.10 /usr/bin/python
 RUN ln -s /usr/bin/pip3 /usr/bin/pip
 
