@@ -5,7 +5,31 @@ nixPkgs = [
   "gcc",
   "coreutils",
   "findutils",
-  "glibc"
+  "glibc",
+  "glib",
+  "gobject-introspection",
+  "nss",
+  "dbus",
+  "atk",
+  "at-spi2-atk",
+  "expat",
+  "at-spi2-core",
+  "xorg.libX11",
+  "xorg.libXcomposite",
+  "xorg.libXdamage",
+  "xorg.libXext",
+  "xorg.libXfixes",
+  "xorg.libXrandr",
+  "mesa",
+  "xorg.libxcb",
+  "libxkbcommon",
+  "systemd",
+  "alsa-lib",
+  "fontconfig",
+  "freetype",
+  "pango",
+  "cairo",
+  "gtk3"
 ]
 
 [phases.install]
