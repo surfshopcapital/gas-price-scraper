@@ -120,31 +120,18 @@ class GasScraper:
             
             print("   🚀 Launching Chrome...")
             
-            # Use regular Selenium ChromeDriver instead of undetected_chromedriver
+            # Use webdriver-manager to automatically download and manage ChromeDriver
             try:
-                # Try to use ChromeDriver from PATH first
-                self.driver = webdriver.Chrome(options=options)
+                from webdriver_manager.chrome import ChromeDriverManager
+                from selenium.webdriver.chrome.service import Service
+                
+                print("   📥 Downloading ChromeDriver automatically...")
+                service = Service(ChromeDriverManager().install())
+                self.driver = webdriver.Chrome(service=service, options=options)
+                print("   ✅ ChromeDriver downloaded and installed successfully")
             except Exception as e:
-                print(f"   ⚠️ ChromeDriver not in PATH, trying alternative...")
-                try:
-                    # Try to use ChromeDriver from common locations
-                    import os
-                    chrome_paths = [
-                        "chromedriver.exe",
-                        os.path.join(os.getcwd(), "chromedriver.exe"),
-                        os.path.join(os.path.expanduser("~"), "chromedriver.exe")
-                    ]
-                    
-                    for chrome_path in chrome_paths:
-                        if os.path.exists(chrome_path):
-                            service = Service(chrome_path)
-                            self.driver = webdriver.Chrome(service=service, options=options)
-                            break
-                    else:
-                        raise Exception("ChromeDriver not found in any expected location")
-                except Exception as e2:
-                    print(f"   ❌ ChromeDriver setup failed: {e2}")
-                    return None
+                print(f"   ❌ ChromeDriver setup failed: {e}")
+                return None
             
             # Set window size
             self.driver.set_window_size(1920, 1080)
