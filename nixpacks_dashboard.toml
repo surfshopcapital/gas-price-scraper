@@ -3,12 +3,8 @@ nixPkgs = [
   "python311",
   "postgresql_16.dev",
   "gcc",
-  "chromium",
-  "chromedriver",
-  "coreutils",  # Provides ls, echo, test, and other basic commands
-  "findutils",   # Provides find command
-  "glibc",      # Required for Chrome
-  "nss"         # Required for Chrome
+  "coreutils",
+  "findutils"
 ]
 
 [phases.install]
@@ -22,8 +18,8 @@ cmds = [
 [phases.build]
 cmds = [
   ". /opt/venv/bin/activate",
-  "echo 'Build completed successfully'"
+  "echo 'Dashboard build completed successfully'"
 ]
 
 [start]
-cmd = "python run_scraper.py"
+cmd = "streamlit run dashboard.py --server.port $PORT --server.address 0.0.0.0"
