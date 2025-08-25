@@ -6,7 +6,37 @@ This script starts the gas price scraper in scheduled mode for Railway deploymen
 
 import os
 import sys
+import threading
+import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from gas_scraper import GasScraper
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health' or self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK - Gas Price Scraper Running')
+        elif self.path == '/favicon.ico':
+            self.send_response(204)  # No content for favicon
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        # Suppress HTTP request logging
+        pass
+
+def start_health_server(port=8000):
+    """Start a simple HTTP server for health checks"""
+    try:
+        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+        print(f"🏥 Health check server started on port {port}")
+        server.serve_forever()
+    except Exception as e:
+        print(f"❌ Health server error: {e}")
 
 def main():
     print("🚀 Starting Gas Price Scraper in scheduled mode...")
@@ -23,6 +53,11 @@ def main():
         # Create scraper instance
         print("🔧 Creating scraper instance...")
         scraper = GasScraper()
+        
+        # Start health check server in a separate thread
+        port = int(os.getenv('PORT', 8000))
+        health_thread = threading.Thread(target=start_health_server, args=(port,), daemon=True)
+        health_thread.start()
         
         # Start the scheduler
         print("📅 Starting scheduler...")
