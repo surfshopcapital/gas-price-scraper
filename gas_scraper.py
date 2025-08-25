@@ -258,7 +258,7 @@ class GasScraper:
         except Exception as e:
             print(f"❌ Error setting up Chrome driver: {e}")
             return None
-    
+
     def create_fresh_chrome_driver(self):
         """Create a completely fresh Chrome driver instance"""
         try:
@@ -284,147 +284,47 @@ class GasScraper:
         except Exception as e:
             print(f"❌ Error creating fresh Chrome driver: {e}")
             return None
-            
-            if self.headless:
-                print("   👻 Running in headless mode")
-                options.add_argument('--headless')
-            else:
-                print("   📱 Running in visible mode")
-            
-            # Anti-detection options
-            options.add_argument('--no-sandbox')
-            options.add_argument('--disable-dev-shm-usage')
-            options.add_argument('--disable-blink-features=AutomationControlled')
-            options.add_argument('--disable-extensions')
-            options.add_argument('--disable-gpu')
-            options.add_argument('--disable-plugins')
-            options.add_argument('--disable-images')
-            # options.add_argument('--disable-javascript')  # Commented out - needed for dynamic content
-            
-            # User agent to look more human
-            options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-            
-            print("   🚀 Launching Chrome...")
-            
-            # Find Chrome binary and set up ChromeDriver for Railway environment
-            try:
-                print("   🔍 Looking for Chrome binary...")
-                
-                # Use Python's built-in capabilities instead of system commands
-                import os
-                import glob
-                
-                print("   🔍 Using Python-based Chrome detection...")
-                
-                # Method 1: Try to use Chrome directly without specifying binary location
-                try:
-                    print("   🔍 Attempting to create Chrome driver without binary specification...")
-                    self.driver = webdriver.Chrome(options=options)
-                    print("   ✅ Chrome driver created successfully without binary specification")
-                    return self.driver
-                except Exception as e:
-                    print(f"   ⚠️ Direct Chrome creation failed: {e}")
-                
-                # Method 2: Search for Chrome in common nix store patterns using Python
-                print("   🔍 Searching for Chrome in nix store patterns...")
-                
-                # Common nix store patterns for chromium
-                nix_patterns = [
-                    "/nix/store/*/chromium*/bin/chromium",
-                    "/nix/store/*/chromium*/bin/chromium-browser",
-                    "/nix/store/*/chromium*/bin/google-chrome",
-                    "/nix/store/*/chromium*/bin/google-chrome-stable"
-                ]
-                
-                chrome_found = False
-                for pattern in nix_patterns:
-                    try:
-                        expanded_paths = glob.glob(pattern)
-                        print(f"   🔍 Pattern '{pattern}' expanded to: {expanded_paths}")
-                        
-                        for expanded_path in expanded_paths:
-                            # Check if file exists using Python's os.path
-                            if os.path.isfile(expanded_path):
-                                print(f"   ✅ Found Chrome binary at: {expanded_path}")
-                                options.binary_location = expanded_path
-                                chrome_found = True
-                                break
-                        
-                        if chrome_found:
-                            break
-                    except Exception as e:
-                        print(f"   ⚠️ Error with pattern '{pattern}': {e}")
-                        continue
-                
-                # Method 3: Try common Linux paths
-                if not chrome_found:
-                    print("   🔍 Trying common Linux Chrome paths...")
-                    common_paths = [
-                        "/usr/bin/chromium",
-                        "/usr/bin/chromium-browser",
-                        "/usr/bin/google-chrome",
-                        "/usr/bin/google-chrome-stable",
-                        "/snap/bin/chromium",
-                        "/opt/google/chrome/chrome"
-                    ]
-                    
-                    for chrome_path in common_paths:
-                        if os.path.isfile(chrome_path):
-                            print(f"   ✅ Found Chrome at: {chrome_path}")
-                            options.binary_location = chrome_path
-                            chrome_found = True
-                            break
-                
-                # Method 4: Try to find chromedriver in PATH
-                if not chrome_found:
-                    print("   🔍 Trying to find chromedriver in system...")
-                    try:
-                        # Let Selenium find chromedriver automatically
-                        self.driver = webdriver.Chrome(options=options)
-                        print("   ✅ Chrome driver created with auto-detected chromedriver")
-                        return self.driver
-                    except Exception as e:
-                        print(f"   ⚠️ Auto-detection failed: {e}")
-                
-                if not chrome_found:
-                    print("   ❌ Chrome binary not found in any expected location")
-                    
-                    # Final fallback: Try webdriver-manager
-                    print("   🔄 Trying webdriver-manager as final fallback...")
-                    try:
-                        from webdriver_manager.chrome import ChromeDriverManager
-                        from selenium.webdriver.chrome.service import Service
-                        
-                        print("   📥 Downloading ChromeDriver automatically...")
-                        service = Service(ChromeDriverManager().install())
-                        self.driver = webdriver.Chrome(service=service, options=options)
-                        print("   ✅ Chrome driver created successfully with webdriver-manager")
-                        return self.driver
-                    except Exception as e:
-                        print(f"   ❌ Webdriver-manager fallback failed: {e}")
-                        return None
-                
-                # Create Chrome driver with found binary
-                try:
-                    self.driver = webdriver.Chrome(options=options)
-                    print("   ✅ Chrome driver created successfully")
-                except Exception as e:
-                    print(f"   ❌ Failed to create Chrome driver with binary: {e}")
-                    return None
-            except Exception as e:
-                print(f"   ❌ ChromeDriver setup failed: {e}")
-                return None
-            
-            # Set window size
-            self.driver.set_window_size(1920, 1080)
-            print("   ✅ Chrome driver setup complete")
-            
-            return self.driver
-            
-        except Exception as e:
-            print(f"❌ Error setting up Chrome driver: {e}")
-            return None
     
+    def navigate_with_retry(self, driver, url, max_attempts=3):
+        """Navigate to URL with retry logic for DevTools disconnections"""
+        for attempt in range(max_attempts):
+            try:
+                print(f"   🚀 Navigation attempt {attempt + 1}/{max_attempts} to {url}")
+                driver.get(url)
+                
+                # Wait for page to load
+                time.sleep(5)
+                
+                # Check if navigation was successful
+                if driver.current_url == url or url in driver.current_url:
+                    print("   ✅ Navigation successful")
+                    return True
+                else:
+                    print(f"   ⚠️ Navigation redirected to: {driver.current_url}")
+                    
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "disconnected" in error_msg or "cannot determine loading status" in error_msg or "unable to receive message" in error_msg:
+                    print(f"   ⚠️ Navigation failed due to DevTools disconnection (attempt {attempt + 1}): {e}")
+                    if attempt < max_attempts - 1:
+                        print("   🔄 Recreating driver and retrying navigation...")
+                        try:
+                            driver.quit()
+                        except:
+                            pass
+                        if not self.setup_chrome_driver():
+                            print("   ❌ Failed to recreate Chrome driver")
+                            return False
+                        driver = self.driver
+                        time.sleep(3)
+                        continue
+                    else:
+                        print("   ❌ Max navigation retries reached")
+                        return False
+                else:
+                    print(f"   ⚠️ Navigation error: {e}")
+                    return False
+            
     def scrape_gasbuddy(self):
         """Scrape GasBuddy Fuel Insights"""
         driver = None
@@ -567,14 +467,62 @@ class GasScraper:
                 # Store reference to driver
                 driver = self.driver
                 
-                # Navigate to AAA
+                # Navigate to AAA with robust retry logic
                 target_url = "https://gasprices.aaa.com/"
                 print(f"🌐 Navigating to: {target_url}")
-                driver.get(target_url)
+
+                # Robust navigation with retry and driver recreation
+                navigation_success = False
+                for nav_attempt in range(3):
+                    try:
+                        print(f"   �� Navigation attempt {nav_attempt + 1}/3...")
+                        
+                        # Try to navigate
+                        driver.get(target_url)
+                        
+                        # Wait for page to load
+                        time.sleep(8)
+                        
+                        # Check if navigation was successful
+                        if "gasprices.aaa.com" in driver.current_url:
+                            navigation_success = True
+                            print("   ✅ Navigation successful")
+                            break
+                        else:
+                            print(f"   ⚠️ Navigation redirected to: {driver.current_url}")
+                            
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        if any(keyword in error_msg for keyword in ["disconnected", "cannot determine loading status", "unable to receive message"]):
+                            print(f"   ⚠️ Navigation failed due to DevTools disconnection (attempt {nav_attempt + 1}): {e}")
+                            
+                            if nav_attempt < 2:
+                                print("   🔄 Recreating driver and retrying...")
+                                try:
+                                    driver.quit()
+                                except:
+                                    pass
+                                
+                                # Create fresh driver
+                                if not self.setup_chrome_driver():
+                                    print("   ❌ Failed to recreate Chrome driver")
+                                    return None
+                                driver = self.driver
+                                time.sleep(3)
+                                continue
+                            else:
+                                print("   ❌ Max navigation retries reached")
+                                return None
+                        else:
+                            print(f"   ⚠️ Navigation error: {e}")
+                            break
+
+                if not navigation_success:
+                    print("   ❌ Navigation failed after all attempts")
+                    return None
+
                 
-                # Wait for page to load - longer wait for table data
-                print("⏳ Waiting for page to load...")
-                time.sleep(8)
+
                 
                 # Try to wait for the table to appear
                 try:
@@ -956,23 +904,80 @@ class GasScraper:
         try:
             print("🔍 Extracting RBOB futures data...")
             
-            # Find the price element
-            price_element = self.driver.find_element(By.CSS_SELECTOR, "span.value")
-            price_text = price_element.text.strip()
-            print(f"   ✅ Found RBOB price: ${price_text}")
+            # Try multiple selectors for the price element (MarketWatch has changed their structure)
+            price_selectors = [
+                "bg-quote.value",  # Most precise selector from current HTML
+                "h2.intraday__price bg-quote.value",
+                "h2.intraday__price .value",
+                ".intraday__price .value",
+                ".intraday__price",
+                "h2.intraday__price",
+                ".value",
+                "[data-testid='price']",
+                ".price"
+            ]
             
-            # Find the timestamp element
-            timestamp_element = self.driver.find_element(By.CSS_SELECTOR, "span.timestamp__time")
-            timestamp_text = timestamp_element.text.strip()
-            print(f"   🕒 Found timestamp: {timestamp_text}")
+            price_element = None
+            price_text = None
+            
+            for selector in price_selectors:
+                try:
+                    price_element = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    price_text = price_element.text.strip()
+                    if price_text and price_text != "":
+                        print(f"   ✅ Found RBOB price using selector '{selector}': {price_text}")
+                        break
+                except:
+                    continue
+            
+            if not price_text:
+                print("   ❌ Could not find RBOB price with any selector")
+                # Try to get page source for debugging
+                try:
+                    page_source = self.driver.page_source
+                    if "RBOB" in page_source:
+                        print("   🔍 RBOB content found in page source")
+                    else:
+                        print("   🔍 RBOB content not found in page source")
+                except:
+                    pass
+                return None
+            
+            # Try multiple selectors for the timestamp element
+            timestamp_selectors = [
+                "span.timestamp__time",
+                ".intraday__timestamp",
+                ".timestamp",
+                "[data-testid='timestamp']",
+                ".last-updated"
+            ]
+            
+            timestamp_element = None
+            timestamp_text = None
+            
+            for selector in timestamp_selectors:
+                try:
+                    timestamp_element = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    timestamp_text = timestamp_element.text.strip()
+                    if timestamp_text and timestamp_text != "":
+                        print(f"   🕒 Found timestamp using selector '{selector}': {timestamp_text}")
+                        break
+                except:
+                    continue
+            
+            if not timestamp_text:
+                timestamp_text = "Unknown"
+                print("   ⚠️ Could not find timestamp, using default")
             
             # Extract price
             try:
-                price = float(price_text)
+                # Clean up price text (remove any non-numeric characters except decimal point)
+                clean_price = ''.join(c for c in price_text if c.isdigit() or c == '.')
+                price = float(clean_price)
                 print(f"   🎯 Successfully extracted RBOB price: ${price}")
                 
                 # Clean up timestamp text
-                timestamp = timestamp_text.replace("Last Updated: ", "").strip()
+                timestamp = timestamp_text.replace("Last Updated: ", "").replace("Last Updated:", "").strip()
                 
                 return {
                     'price': price,
@@ -1042,23 +1047,80 @@ class GasScraper:
         try:
             print("🔍 Extracting WTI crude oil futures data...")
             
-            # Find the price element
-            price_element = self.driver.find_element(By.CSS_SELECTOR, "span.value")
-            price_text = price_element.text.strip()
-            print(f"   ✅ Found WTI price: ${price_text}")
+            # Try multiple selectors for the price element (MarketWatch has changed their structure)
+            price_selectors = [
+                "bg-quote.value",  # Most precise selector from current HTML
+                "h2.intraday__price bg-quote.value",
+                "h2.intraday__price .value",
+                ".intraday__price .value",
+                ".intraday__price",
+                "h2.intraday__price",
+                ".value",
+                "[data-testid='price']",
+                ".price"
+            ]
             
-            # Find the timestamp element
-            timestamp_element = self.driver.find_element(By.CSS_SELECTOR, "span.timestamp__time")
-            timestamp_text = timestamp_element.text.strip()
-            print(f"   🕒 Found timestamp: {timestamp_text}")
+            price_element = None
+            price_text = None
+            
+            for selector in price_selectors:
+                try:
+                    price_element = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    price_text = price_element.text.strip()
+                    if price_text and price_text != "":
+                        print(f"   ✅ Found WTI price using selector '{selector}': {price_text}")
+                        break
+                except:
+                    continue
+            
+            if not price_text:
+                print("   ❌ Could not find WTI price with any selector")
+                # Try to get page source for debugging
+                try:
+                    page_source = self.driver.page_source
+                    if "WTI" in page_source or "Crude Oil" in page_source:
+                        print("   🔍 WTI content found in page source")
+                    else:
+                        print("   🔍 WTI content not found in page source")
+                except:
+                    pass
+                return None
+            
+            # Try multiple selectors for the timestamp element
+            timestamp_selectors = [
+                "span.timestamp__time",
+                ".intraday__timestamp",
+                ".timestamp",
+                "[data-testid='timestamp']",
+                ".last-updated"
+            ]
+            
+            timestamp_element = None
+            timestamp_text = None
+            
+            for selector in timestamp_selectors:
+                try:
+                    timestamp_element = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    timestamp_text = timestamp_element.text.strip()
+                    if timestamp_text and timestamp_text != "":
+                        print(f"   🕒 Found timestamp using selector '{selector}': {timestamp_text}")
+                        break
+                except:
+                    continue
+            
+            if not timestamp_text:
+                timestamp_text = "Unknown"
+                print("   ⚠️ Could not find timestamp, using default")
             
             # Extract price
             try:
-                price = float(price_text)
+                # Clean up price text (remove any non-numeric characters except decimal point)
+                clean_price = ''.join(c for c in price_text if c.isdigit() or c == '.')
+                price = float(clean_price)
                 print(f"   🎯 Successfully extracted WTI price: ${price}")
                 
                 # Clean up timestamp text
-                timestamp = timestamp_text.replace("Last Updated: ", "").strip()
+                timestamp = timestamp_text.replace("Last Updated: ", "").replace("Last Updated:", "").strip()
                 
                 return {
                     'price': price,
