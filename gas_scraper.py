@@ -108,6 +108,45 @@ class GasScraper:
             print(f"   ⚠️ Driver responsiveness check error: {e}")
             return False
     
+    def test_driver_connection(self, driver, max_attempts=3):
+        """Test if driver can maintain a stable connection to DevTools"""
+        try:
+            print("   🔍 Testing driver connection stability...")
+            
+            for attempt in range(max_attempts):
+                try:
+                    # Test basic operations
+                    driver.execute_script("return navigator.userAgent")
+                    driver.execute_script("return document.readyState")
+                    
+                    # Test navigation to a simple page
+                    test_url = "data:text/html,<html><body>Test</body></html>"
+                    driver.get(test_url)
+                    
+                    # Verify we can read the page
+                    page_source = driver.page_source
+                    if "Test" in page_source:
+                        print(f"   ✅ Connection test {attempt + 1} passed")
+                        return True
+                    else:
+                        print(f"   ⚠️ Connection test {attempt + 1} failed - page content mismatch")
+                        
+                except Exception as e:
+                    print(f"   ⚠️ Connection test {attempt + 1} failed: {e}")
+                    if attempt < max_attempts - 1:
+                        print("   🔄 Retrying connection test...")
+                        time.sleep(2)
+                        continue
+                    else:
+                        print("   ❌ All connection tests failed")
+                        return False
+            
+            return False
+            
+        except Exception as e:
+            print(f"   ❌ Connection test error: {e}")
+            return False
+    
     def setup_chrome_driver(self):
         """Set up Chrome driver with CDP capabilities"""
         try:
@@ -143,6 +182,28 @@ class GasScraper:
             options.add_argument('--disable-gpu')
             options.add_argument('--disable-plugins')
             options.add_argument('--disable-images')
+            options.add_argument('--disable-background-timer-throttling')
+            options.add_argument('--disable-backgrounding-occluded-windows')
+            options.add_argument('--disable-renderer-backgrounding')
+            options.add_argument('--disable-features=TranslateUI')
+            options.add_argument('--disable-hang-monitor')
+            options.add_argument('--disable-prompt-on-repost')
+            options.add_argument('--disable-client-side-phishing-detection')
+            options.add_argument('--disable-component-extensions-with-background-pages')
+            options.add_argument('--disable-default-apps')
+            options.add_argument('--disable-sync')
+            options.add_argument('--metrics-recording-only')
+            options.add_argument('--no-first-run')
+            options.add_argument('--safebrowsing-disable-auto-update')
+            options.add_argument('--disable-extensions-except')
+            options.add_argument('--disable-component-update')
+            options.add_argument('--disable-domain-reliability')
+            options.add_argument('--disable-ipc-flooding-protection')
+            options.add_argument('--memory-pressure-off')
+            options.add_argument('--max_old_space_size=4096')
+            options.add_argument('--single-process')
+            options.add_argument('--no-zygote')
+            options.add_argument('--disable-setuid-sandbox')
             
             # Platform-specific options
             import platform
@@ -346,15 +407,45 @@ class GasScraper:
         try:
             print("🔄 Getting fresh driver for new job...")
             
-            # Always create a fresh driver for each job
-            driver = self.create_fresh_chrome_driver()
+            # Try up to 3 times to get a stable driver
+            for attempt in range(3):
+                print(f"   🔄 Driver creation attempt {attempt + 1}/3...")
+                
+                # Always create a fresh driver for each job
+                driver = self.create_fresh_chrome_driver()
+                
+                if driver:
+                    print("   ✅ Fresh driver created successfully")
+                    
+                    # Test the connection before returning
+                    if self.test_driver_connection(driver):
+                        print("   ✅ Driver connection verified - ready for use")
+                        return driver
+                    else:
+                        print(f"   ⚠️ Driver connection test failed (attempt {attempt + 1})")
+                        try:
+                            driver.quit()
+                        except:
+                            pass
+                        
+                        if attempt < 2:  # Not the last attempt
+                            print("   🔄 Retrying with new driver...")
+                            time.sleep(3)
+                            continue
+                        else:
+                            print("   ❌ All driver attempts failed connection test")
+                            return None
+                else:
+                    print(f"   ❌ Failed to create fresh driver (attempt {attempt + 1})")
+                    if attempt < 2:
+                        print("   🔄 Retrying driver creation...")
+                        time.sleep(3)
+                        continue
+                    else:
+                        print("   ❌ All driver creation attempts failed")
+                        return None
             
-            if driver:
-                print("   ✅ Fresh driver created successfully")
-                return driver
-            else:
-                print("   ❌ Failed to create fresh driver")
-                return None
+            return None
                 
         except Exception as e:
             print(f"❌ Error getting fresh driver: {e}")
@@ -365,6 +456,23 @@ class GasScraper:
         for attempt in range(max_attempts):
             try:
                 print(f"   🚀 Navigation attempt {attempt + 1}/{max_attempts} to {url}")
+                
+                # Test connection before navigation
+                if not self.is_driver_responsive(driver):
+                    print(f"   ⚠️ Driver not responsive before navigation (attempt {attempt + 1})")
+                    if attempt < max_attempts - 1:
+                        print("   🔄 Getting fresh driver for retry...")
+                        driver = self.get_fresh_driver_for_job()
+                        if not driver:
+                            print("   ❌ Failed to get fresh driver")
+                            return False
+                        time.sleep(2)
+                        continue
+                    else:
+                        print("   ❌ Max navigation retries reached")
+                        return False
+                
+                # Attempt navigation
                 driver.get(url)
                 
                 # Wait for page to load
@@ -382,15 +490,15 @@ class GasScraper:
                 if "disconnected" in error_msg or "cannot determine loading status" in error_msg or "unable to receive message" in error_msg:
                     print(f"   ⚠️ Navigation failed due to DevTools disconnection (attempt {attempt + 1}): {e}")
                     if attempt < max_attempts - 1:
-                        print("   🔄 Recreating driver and retrying navigation...")
+                        print("   🔄 Getting fresh driver for retry...")
                         try:
                             driver.quit()
                         except:
                             pass
-                        if not self.setup_chrome_driver():
-                            print("   ❌ Failed to recreate Chrome driver")
+                        driver = self.get_fresh_driver_for_job()
+                        if not driver:
+                            print("   ❌ Failed to get fresh driver")
                             return False
-                        driver = self.driver
                         time.sleep(3)
                         continue
                     else:
