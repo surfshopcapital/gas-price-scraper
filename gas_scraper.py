@@ -211,15 +211,15 @@ class GasScraper:
                 print("   🔍 Using Python-based Chrome detection...")
                 
                 # Method 1: Try to use Chrome directly without specifying binary location
-                                 try:
-                     print("   🔍 Attempting to create Chrome driver without binary specification...")
-                     service = Service(log_path="/tmp/chromedriver.log")
-                     self.driver = webdriver.Chrome(service=service, options=options)
-                     self.driver.set_page_load_timeout(60)
-                     print("   ✅ Chrome driver created successfully without binary specification")
-                     return self.driver
-                 except Exception as e:
-                     print(f"   ⚠️ Direct Chrome creation failed: {e}")
+                try:
+                    print("   🔍 Attempting to create Chrome driver without binary specification...")
+                    service = Service(log_path="/tmp/chromedriver.log")
+                    self.driver = webdriver.Chrome(service=service, options=options)
+                    self.driver.set_page_load_timeout(60)
+                    print("   ✅ Chrome driver created successfully without binary specification")
+                    return self.driver
+                except Exception as e:
+                    print(f"   ⚠️ Direct Chrome creation failed: {e}")
                 
                 # Method 2: Search for Chrome in common nix store patterns using Python
                 print("   🔍 Searching for Chrome in nix store patterns...")
@@ -1184,15 +1184,15 @@ class GasScraper:
             
             if not price_text:
                 print("   ❌ Could not find RBOB price with any selector")
-                                          # Try to get page source for debugging
-             try:
-                 page_source = target_driver.page_source
-                 if "RBOB" in page_source:
-                     print("   🔍 RBOB content found in page source")
-                 else:
-                     print("   🔍 RBOB content not found in page source")
-             except:
-                 pass
+                # Try to get page source for debugging
+                try:
+                    page_source = target_driver.page_source
+                    if "RBOB" in page_source:
+                        print("   �� RBOB content found in page source")
+                    else:
+                        print("   🔍 RBOB content not found in page source")
+                except:
+                    pass
                 return None
             
             # Try multiple selectors for the timestamp element
