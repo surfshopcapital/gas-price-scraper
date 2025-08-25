@@ -23,7 +23,7 @@ nixPkgs = [
   "gtk3",
   "pango",
   "cairo",
-  "alsaLib",
+  "alsa-lib",
   "cups",
   "dbus"
 ]
