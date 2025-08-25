@@ -127,6 +127,29 @@ class GasScraper:
                 
                 print("   📥 Downloading ChromeDriver automatically...")
                 service = Service(ChromeDriverManager().install())
+                
+                # Set Chrome binary path for Railway environment
+                chrome_paths = [
+                    "/nix/store/*/chromium/bin/chromium",
+                    "/usr/bin/chromium",
+                    "/usr/bin/chromium-browser",
+                    "/usr/bin/google-chrome",
+                    "/usr/bin/google-chrome-stable"
+                ]
+                
+                # Try to find an available Chrome binary
+                import subprocess
+                for chrome_path in chrome_paths:
+                    try:
+                        result = subprocess.run(['which', chrome_path.replace('*', '')], 
+                                             capture_output=True, text=True, shell=True)
+                        if result.returncode == 0:
+                            options.binary_location = result.stdout.strip()
+                            print(f"   🔍 Found Chrome at: {options.binary_location}")
+                            break
+                    except:
+                        continue
+                
                 self.driver = webdriver.Chrome(service=service, options=options)
                 print("   ✅ ChromeDriver downloaded and installed successfully")
             except Exception as e:
