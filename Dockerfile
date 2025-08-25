@@ -6,8 +6,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Install Python and system dependencies
 RUN apt-get update && apt-get install -y \
     python3.10 \
-    python3.10-pip \
     python3.10-venv \
+    python3-pip \
     wget \
     gnupg \
     ca-certificates \
@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y \
 
 # Create symlinks for python and pip
 RUN ln -s /usr/bin/python3.10 /usr/bin/python
-RUN ln -s /usr/bin/pip3.10 /usr/bin/pip
+RUN ln -s /usr/bin/pip3 /usr/bin/pip
 
 # Set working directory
 WORKDIR /app
