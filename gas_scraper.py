@@ -120,15 +120,11 @@ class GasScraper:
             
             print("   🚀 Launching Chrome...")
             
-            # Use webdriver-manager to automatically download and manage ChromeDriver
+            # Find Chrome binary and set up ChromeDriver for Railway environment
             try:
-                from webdriver_manager.chrome import ChromeDriverManager
-                from selenium.webdriver.chrome.service import Service
+                print("   🔍 Looking for Chrome binary...")
                 
-                print("   📥 Downloading ChromeDriver automatically...")
-                service = Service(ChromeDriverManager().install())
-                
-                # Set Chrome binary path for Railway environment
+                # Common Chrome/Chromium paths in Railway/nixpacks environment
                 chrome_paths = [
                     "/nix/store/*/chromium/bin/chromium",
                     "/usr/bin/chromium",
@@ -139,19 +135,36 @@ class GasScraper:
                 
                 # Try to find an available Chrome binary
                 import subprocess
-                for chrome_path in chrome_paths:
-                    try:
-                        result = subprocess.run(['which', chrome_path.replace('*', '')], 
-                                             capture_output=True, text=True, shell=True)
-                        if result.returncode == 0:
-                            options.binary_location = result.stdout.strip()
-                            print(f"   🔍 Found Chrome at: {options.binary_location}")
-                            break
-                    except:
-                        continue
+                import glob
+                chrome_found = False
                 
-                self.driver = webdriver.Chrome(service=service, options=options)
-                print("   ✅ ChromeDriver downloaded and installed successfully")
+                for chrome_path in chrome_paths:
+                    if '*' in chrome_path:
+                        # Handle wildcard paths (nixpacks)
+                        expanded_paths = glob.glob(chrome_path)
+                        for expanded_path in expanded_paths:
+                            if subprocess.run(['test', '-f', expanded_path], capture_output=True).returncode == 0:
+                                options.binary_location = expanded_path
+                                print(f"   🔍 Found Chrome at: {expanded_path}")
+                                chrome_found = True
+                                break
+                        if chrome_found:
+                            break
+                    else:
+                        # Handle direct paths
+                        if subprocess.run(['test', '-f', chrome_path], capture_output=True).returncode == 0:
+                            options.binary_location = chrome_path
+                            print(f"   🔍 Found Chrome at: {chrome_path}")
+                            chrome_found = True
+                            break
+                
+                if not chrome_found:
+                    print("   ❌ Chrome binary not found in any expected location")
+                    return None
+                
+                # Create Chrome driver with found binary
+                self.driver = webdriver.Chrome(options=options)
+                print("   ✅ Chrome driver created successfully")
             except Exception as e:
                 print(f"   ❌ ChromeDriver setup failed: {e}")
                 return None
