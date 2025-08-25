@@ -4,7 +4,9 @@ nixPkgs = [
   "postgresql_16.dev",
   "gcc",
   "chromium",
-  "chromedriver"
+  "chromedriver",
+  "coreutils",  # Provides ls, echo, test, and other basic commands
+  "findutils"   # Provides find command
 ]
 
 [phases.install]
