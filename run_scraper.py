@@ -6,8 +6,8 @@ This script starts the gas price scraper in scheduled mode for Railway deploymen
 
 import os
 import sys
-import threading
 import time
+import select
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from gas_scraper import GasScraper
 
@@ -55,39 +55,52 @@ def main():
         print("🔧 Creating scraper instance...")
         scraper = GasScraper()
         
-        # Start health check server FIRST and wait for it to be ready
+        # Start health check server
         port = int(os.getenv('PORT', 8000))
         print(f"🌐 Starting HTTP server on port {port}...")
         
-        # Start HTTP server in main thread first to ensure it's ready
         server = start_health_server(port)
         if not server:
             print("❌ Failed to start HTTP server")
             sys.exit(1)
         
-        # Start HTTP server in background thread
-        def run_server():
-            try:
-                server.serve_forever()
-            except Exception as e:
-                print(f"❌ HTTP server error: {e}")
-        
-        health_thread = threading.Thread(target=run_server, daemon=True)
-        health_thread.start()
-        
-        # Give the server a moment to start
-        time.sleep(2)
         print("✅ HTTP server ready for health checks")
         
-        # Start the scheduler
+        # Start the scheduler in a non-blocking way
         print("📅 Starting scheduler...")
-        scraper.run_scheduled()
         
-    except KeyboardInterrupt:
-        print("\n⏹️ Scraper stopped by user")
+        # Run initial job once
+        print("🚀 Initial run of all sources once...")
+        scraper.run_all_sources_once()
+        print("✅ Initial run complete; continuing on schedule.")
+        
+        # Run scheduler and HTTP server together
+        while True:
+            try:
+                # Handle HTTP requests (non-blocking)
+                server.handle_request()
+                
+                # Run pending scheduled tasks
+                import schedule
+                schedule.run_pending()
+                
+                # Small sleep to prevent CPU spinning
+                time.sleep(0.1)
+                
+            except KeyboardInterrupt:
+                print("\n⏹️ Scraper stopped by user")
+                break
+            except Exception as e:
+                print(f"❌ Error in main loop: {e}")
+                time.sleep(1)  # Wait before retrying
+        
     except Exception as e:
         print(f"❌ Error starting scraper: {e}")
         sys.exit(1)
+    finally:
+        if 'server' in locals():
+            server.server_close()
+        print("🔄 Shutting down...")
 
 if __name__ == "__main__":
     main()
