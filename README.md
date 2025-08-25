@@ -1,205 +1,220 @@
-# ⛽ Gas Price Scraper & Dashboard
+# 🚗 Gas Price Scraper & Dashboard
 
-A comprehensive web scraping and data visualization system for gas prices and energy market data from multiple sources.
+A comprehensive gas price monitoring system that scrapes data from multiple sources and provides real-time analytics through a Streamlit dashboard.
 
-## 🚀 Features
+## 🌟 Features
+
+- **Multi-Source Data Collection**: GasBuddy, AAA, RBOB Futures, WTI Crude, EIA Data
+- **Real-Time Dashboard**: Streamlit-based interface with interactive charts
+- **Automated Scheduling**: Configurable scraping intervals for different data sources
+- **Cloud Deployment**: Railway.app hosting for both scraper and dashboard
+- **Data Backup**: Automated daily CSV and SQL backups
+- **Excel Export**: Daily and monthly data exports with multiple tabs
+
+## 🏗️ Architecture
 
 ### Data Sources
-- **GasBuddy Fuel Insights** - Real-time gas prices (every 10 minutes)
-- **AAA Gas Prices** - Daily gas price averages (12:01 AM Pacific)
-- **RBOB Futures** - Gasoline futures prices (every 2 hours, Mon-Fri market hours)
-- **WTI Crude Futures** - Oil futures prices (every 2 hours, Mon-Fri market hours)
-- **Gasoline Stocks Change** - EIA data with consensus & surprise (daily at 11 AM EST)
-- **Refinery Crude Runs** - EIA refinery data (daily at 11 AM EST)
+- **GasBuddy**: Real-time fuel insights (every 15 minutes)
+- **AAA**: Daily gas price averages (12:01 AM Pacific)
+- **RBOB Futures**: MarketWatch data (every 2 hours during market hours)
+- **WTI Crude**: MarketWatch futures (every 2 hours during market hours)
+- **EIA Data**: Gasoline stocks and refinery runs (daily at 11 AM EST)
 
-### Dashboard Features
-- **Real-time Data Visualization** - Interactive charts and tables
-- **Multi-source Comparison** - Side-by-side data analysis
-- **Historical Trends** - 30-day price history with Plotly charts
-- **Responsive Design** - Works on desktop and mobile
-- **Auto-refresh** - Updates every 5 minutes
+### Technology Stack
+- **Backend**: Python 3.11, Selenium WebDriver, PostgreSQL
+- **Frontend**: Streamlit, Plotly
+- **Scheduling**: Python schedule library
+- **Cloud**: Railway.app with Nixpacks
+- **Database**: PostgreSQL (cloud-hosted)
+
+## 🚀 Quick Start
+
+### Local Development
+
+1. **Clone the repository**
+   ```bash
+   git clone <repository-url>
+   cd gas-scraper
+   ```
+
+2. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Set up database**
+   ```bash
+   python setup_database.py
+   ```
+
+4. **Run the scraper**
+   ```bash
+   python gas_scraper.py
+   ```
+
+5. **Launch dashboard**
+   ```bash
+   streamlit run dashboard.py
+   ```
+
+### Cloud Deployment
+
+#### Railway.app Setup
+
+1. **Create Railway project**
+   - Connect your GitHub repository
+   - Add PostgreSQL database service
+
+2. **Configure environment variables**
+   - `DATABASE_URL`: PostgreSQL connection string
+
+3. **Deploy services**
+   - **Dashboard Service**: Uses `railway_dashboard.json`
+   - **Scraper Service**: Uses `railway.json`
+
+#### Service Configuration
+
+- **Dashboard**: Streamlit app accessible via public URL
+- **Scraper**: Background service running continuously
 
 ## 📁 Project Structure
 
 ```
-Gas Scraper/
-├── gas_scraper.py          # Main scraping script with scheduling
-├── dashboard.py            # Streamlit dashboard application
-├── view_data.py            # Command-line data viewer
-├── requirements.txt        # Dependencies for scraper
-├── requirements_dashboard.txt # Dependencies for dashboard
-├── gas_prices.duckdb      # Database (created automatically)
-├── README.md              # This file
-└── .gitignore             # Git ignore file
+gas-scraper/
+├── gas_scraper.py          # Main scraper logic
+├── dashboard.py            # Streamlit dashboard
+├── run_scraper.py          # Scraper launcher for Railway
+├── setup_database.py       # Database initialization
+├── backup_database.py      # Automated backup system
+├── test_postgresql.py      # Database connection testing
+├── requirements.txt        # Python dependencies
+├── railway.json           # Railway scraper service config
+├── railway_dashboard.json # Railway dashboard service config
+├── nixpacks.toml         # Railway build configuration
+├── Procfile              # Railway process definition
+└── README.md             # This file
 ```
 
-## 🛠️ Installation
+## ⚙️ Configuration
 
-### 1. Clone the Repository
-```bash
-git clone <repository-url>
-cd "Gas Scraper"
+### Scraping Intervals
+- **GasBuddy**: Every 15 minutes
+- **AAA**: Daily at 12:01 AM Pacific
+- **RBOB/WTI**: Every 2 hours (Mon-Fri market hours)
+- **EIA Data**: Daily at 11 AM EST
+- **Backups**: Daily at 6 PM EST
+- **Excel Export**: Daily at 5 PM EST
+
+### Database Schema
+```sql
+CREATE TABLE gas_prices (
+    id SERIAL PRIMARY KEY,
+    source VARCHAR(100),
+    fuel_type VARCHAR(100),
+    price NUMERIC,
+    timestamp VARCHAR(100),
+    region VARCHAR(100),
+    consensus NUMERIC,
+    surprise NUMERIC,
+    scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
-### 2. Create Virtual Environment
-```bash
-# Using conda (recommended)
-conda create -n gas_scraper python=3.9
-conda activate gas_scraper
-
-# Or using venv
-python -m venv env
-source env/bin/activate  # On Windows: env\Scripts\activate
-```
-
-### 3. Install Dependencies
-```bash
-# For the scraper
-pip install -r requirements.txt
-
-# For the dashboard
-pip install -r requirements_dashboard.txt
-```
-
-## 🚀 Usage
-
-### Running the Scraper
-```bash
-python gas_scraper.py
-```
-
-**Menu Options:**
-1. **Test GasBuddy** - Test GasBuddy scraping
-2. **Test AAA** - Test AAA scraping  
-3. **Test RBOB** - Test RBOB futures scraping
-4. **Test WTI** - Test WTI futures scraping
-5. **Test Gasoline Stocks** - Test EIA gasoline stocks
-6. **Test Refinery Runs** - Test EIA refinery runs
-7. **Run GasBuddy Job** - Run GasBuddy scraping job
-8. **Run AAA Job** - Run AAA scraping job
-9. **Run RBOB Job** - Run RBOB scraping job
-10. **Export Daily Excel** - Export today's data to Excel
-11. **Export Monthly Excel** - Export month's data to Excel
-12. **Run Scheduled Jobs** - Start all scheduled scraping jobs
-
-### Running the Dashboard
-```bash
-streamlit run dashboard.py
-```
-
-The dashboard will open in your browser at `http://localhost:8501`
-
-### Viewing Data
-```bash
-python view_data.py
-```
-
-## 📊 Dashboard Features
-
-### Main Dashboard
-- **Overview Metrics** - Total sources, latest updates, database size
-- **Latest Data Cards** - Current values for each data source
-- **Interactive Charts** - Time series plots with Plotly
-- **Data Tables** - Recent records for each source
-- **Summary Statistics** - Price ranges and data freshness
-
-### Sidebar Controls
-- **Time Range Filter** - 7 days, 30 days, 90 days, or all time
-- **Source Filter** - Select which data sources to display
-- **Real-time Updates** - Data refreshes every 5 minutes
-
-## 🗄️ Database Schema
-
-The `gas_prices` table contains:
-- `id` - Auto-incrementing primary key
-- `price` - Numeric price/value
-- `timestamp` - Date/time of the data
-- `region` - Geographic region
-- `source` - Data source identifier
-- `fuel_type` - Type of fuel/commodity
-- `consensus` - Consensus estimate (for EIA data)
-- `surprise` - Actual vs consensus difference
-- `scraped_at` - When the data was scraped
-
-## ⏰ Scheduling
-
-### Scraping Schedule
-- **GasBuddy**: Every 10 minutes
-- **AAA**: Daily at 12:01 AM Pacific (3:01 AM UTC)
-- **RBOB/WTI**: Every 2 hours, Monday 1 AM EST to Friday 11 PM EST
-- **EIA Data**: Daily at 11 AM EST (4 PM UTC)
-
-### Export Schedule
-- **Daily Excel**: Daily at 5 PM EST (10 PM UTC)
-- **Monthly Excel**: 1st of month at 5 PM EST (10 PM UTC)
-
-## 🌐 Streamlit Cloud Deployment
-
-### 1. Push to GitHub
-```bash
-git add .
-git commit -m "Add Streamlit dashboard"
-git push origin main
-```
-
-### 2. Deploy on Streamlit Cloud
-1. Go to [share.streamlit.io](https://share.streamlit.io)
-2. Connect your GitHub repository
-3. Set the main file path to `dashboard.py`
-4. Deploy!
-
-### 3. Environment Variables (if needed)
-- Set any API keys or configuration in Streamlit Cloud's secrets management
-
-## 🔧 Configuration
-
-### Database Location
-The database file `gas_prices.duckdb` is created automatically in the project directory.
-
-### Chrome Driver
-The scraper uses undetected ChromeDriver for web scraping. Make sure you have Chrome installed.
-
-### Location Permissions
-The scraper automatically handles geolocation permissions using Chrome DevTools Protocol.
-
-## 📈 Data Export
-
-### Excel Reports
-- **Daily Report**: Contains all data scraped today with separate tabs
-- **Monthly Report**: Contains all data from the current month
-- **Tabs**: GasBuddy, AAA, RBOB, WTI, Gasoline_Stocks, Refinery_Runs
-
-### CSV Export
-Use `view_data.py` to export specific data sources to CSV format.
-
-## 🐛 Troubleshooting
+## 🔧 Troubleshooting
 
 ### Common Issues
-1. **Chrome Driver Errors**: Ensure Chrome is installed and up to date
-2. **Database Errors**: Delete `gas_prices.duckdb` to reset the database
-3. **Scraping Failures**: Check internet connection and website availability
-4. **Dashboard Loading**: Ensure the database exists and contains data
 
-### Debug Mode
-Run individual scraping tests using the menu options to isolate issues.
+#### DevTools Disconnection (Railway)
+**Problem**: `"disconnected: not connected to DevTools"` errors in cloud environment
+
+**Cause**: Containerized Chrome processes are less stable than local installations
+
+**Solutions**:
+1. **Use GasBuddy Pattern**: All scraping methods now use the proven GasBuddy approach
+2. **Simplified Navigation**: Removed complex retry logic that caused failures
+3. **Proper Driver Cleanup**: Each scraping job creates and destroys its own Chrome driver
+4. **Increased Wait Times**: Longer delays for page loading in cloud environment
+
+#### Chrome Binary Issues
+**Problem**: Chrome/Chromium not found in Railway environment
+
+**Solution**: Nixpacks configuration with system dependencies
+```toml
+[phases.setup]
+nixPkgs = ["python311", "postgresql_16.dev", "gcc", "chromium", "chromedriver", "coreutils", "findutils"]
+```
+
+### Local vs Cloud Differences
+
+| Aspect | Local | Railway |
+|--------|-------|---------|
+| Chrome Stability | ✅ High | ⚠️ Medium |
+| DevTools Connection | ✅ Stable | ⚠️ Fragile |
+| Resource Availability | ✅ Unlimited | ⚠️ Limited |
+| Network Latency | ✅ Low | ⚠️ Variable |
+| Process Management | ✅ Native | ⚠️ Containerized |
+
+## 📊 Data Flow
+
+1. **Scheduler triggers** scraping jobs based on configured intervals
+2. **Selenium WebDriver** navigates to target websites
+3. **Data extraction** using CSS selectors and page parsing
+4. **PostgreSQL storage** with automatic timestamping
+5. **Dashboard updates** in real-time from database
+6. **Automated backups** to CSV and SQL formats
+7. **Excel exports** for daily and monthly reporting
+
+## 🚨 Monitoring & Alerts
+
+### Log Levels
+- **✅ Success**: Data successfully scraped and stored
+- **⚠️ Warning**: Non-critical issues (e.g., missing timestamps)
+- **❌ Error**: Critical failures requiring attention
+- **🔄 Retry**: Automatic retry attempts for failed jobs
+
+### Health Checks
+- Database connection status
+- Chrome driver availability
+- Scraping success rates
+- Backup completion status
+
+## 🔒 Security & Best Practices
+
+- **Environment Variables**: Sensitive data stored in Railway environment
+- **Database Isolation**: Separate database service for data persistence
+- **Process Cleanup**: Automatic Chrome process cleanup after each job
+- **Error Handling**: Comprehensive exception handling and logging
+- **Resource Management**: Efficient memory and CPU usage
+
+## 📈 Performance Optimization
+
+- **Driver Reuse**: Each scraping job uses fresh Chrome driver
+- **Parallel Processing**: Independent scraping jobs don't block each other
+- **Memory Management**: Automatic cleanup of browser processes
+- **Network Efficiency**: Optimized wait times for different websites
 
 ## 🤝 Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Test thoroughly
+4. Test locally and in Railway
 5. Submit a pull request
 
-## 📄 License
+## 📝 License
 
-This project is for educational and research purposes. Please respect the terms of service of the websites being scraped.
+This project is licensed under the MIT License - see the LICENSE file for details.
 
-## 🙏 Acknowledgments
+## 🆘 Support
 
-- **GasBuddy** for fuel price data
-- **AAA** for gas price averages
-- **MarketWatch** for futures data
-- **Trading Economics** for EIA data
-- **Streamlit** for the dashboard framework
-- **DuckDB** for fast data storage
+For issues and questions:
+1. Check the troubleshooting section above
+2. Review Railway deployment logs
+3. Test locally to isolate cloud vs local issues
+4. Check database connectivity and schema
+
+---
+
+**Last Updated**: August 25, 2025  
+**Version**: 2.0.0  
+**Status**: Production Ready ✅

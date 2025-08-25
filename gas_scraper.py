@@ -445,138 +445,200 @@ class GasScraper:
             # Force cleanup of Chrome processes
             self.cleanup_chrome_processes()
     
-    def scrape_aaa(self):
-        """Scrape AAA Gas Prices with robust DevTools handling"""
-        max_retries = 3
-        
-        for attempt in range(max_retries):
-            driver = None
+    def scrape_gasbuddy_with_driver(self, driver):
+        """Scrape GasBuddy Fuel Insights using provided driver"""
+        try:
+            print("🚀 Starting GasBuddy scraping with provided driver...")
+            
+            # Set location permissions and coordinates BEFORE navigating
+            print("📍 Setting geolocation permissions and coordinates...")
+            
+            # US cities with coordinates for randomization
+            us_cities = [
+                {"name": "New York", "lat": 40.7128, "lng": -74.0060},
+                {"name": "Los Angeles", "lat": 34.0522, "lng": -118.2437},
+                {"name": "Chicago", "lat": 41.8781, "lng": -87.6298},
+                {"name": "Houston", "lat": 29.7604, "lng": -95.3698},
+                {"name": "Phoenix", "lat": 33.4484, "lng": -112.0740}
+            ]
+            
+            # Randomly select a US city
+            selected_city = random.choice(us_cities)
+            print(f"   🏙️ Selected location: {selected_city['name']}")
+            
+            # Grant geolocation permissions to the target domain FIRST
             try:
-                print(f"🚗 Starting AAA scraping (attempt {attempt + 1}/{max_retries})...")
-                
-                # Setup Chrome driver
-                if not self.setup_chrome_driver():
-                    print("❌ Failed to setup Chrome driver")
-                    if attempt < max_retries - 1:
-                        print("   🔄 Retrying...")
-                        time.sleep(5)
-                        continue
-                    else:
-                        return None
-                
-                # Store reference to driver
-                driver = self.driver
-                
-                # Navigate to AAA with simplified approach
-                target_url = "https://gasprices.aaa.com/"
-                print(f"🌐 Navigating to: {target_url}")
-
-                try:
-                    # Simple navigation with longer wait
-                    driver.get(target_url)
-                    print("   ✅ Navigation initiated")
-                    
-                    # Wait longer for page to load (DevTools issues often happen during loading)
-                    time.sleep(15)
-                    
-                    # Check if navigation was successful
-                    if "gasprices.aaa.com" in driver.current_url:
-                        print("   ✅ Navigation successful")
-                    else:
-                        print(f"   ⚠️ Navigation redirected to: {driver.current_url}")
-                        
-                except Exception as e:
-                    error_msg = str(e).lower()
-                    if any(keyword in error_msg for keyword in ["disconnected", "cannot determine loading status", "unable to receive message"]):
-                        print(f"   ⚠️ DevTools disconnection during navigation: {e}")
-                        if attempt < max_retries - 1:
-                            print("   🔄 Will retry with fresh driver...")
-                            time.sleep(5)
-                            continue
-                        else:
-                            print("   ❌ Max retries reached")
-                            return None
-                    else:
-                        print(f"   ⚠️ Navigation error: {e}")
-                        if attempt < max_retries - 1:
-                            print("   🔄 Will retry...")
-                            time.sleep(5)
-                            continue
-                        else:
-                            print("   ❌ Max retries reached")
-                            return None
-
-
-
-                
-
-                
-                # Try to wait for the table to appear
-                try:
-                    from selenium.webdriver.support.ui import WebDriverWait
-                    from selenium.webdriver.support import expected_conditions as EC
-                    
-                    # Wait for the tbody element to have content
-                    WebDriverWait(driver, 15).until(
-                        lambda driver: len(driver.find_element(By.TAG_NAME, "tbody").text) > 50
-                    )
-                    print("   ✅ AAA table data loaded")
-                    
-                except Exception as e:
-                    if "disconnected: not connected to DevTools" in str(e):
-                        print(f"   ⚠️ DevTools disconnected on attempt {attempt + 1}: {e}")
-                        if attempt < max_retries - 1:
-                            print("   🔄 Retrying with fresh driver...")
-                            try:
-                                driver.quit()
-                            except:
-                                pass
-                            time.sleep(5)
-                            continue
-                        else:
-                            print("   ❌ Max retries reached, giving up")
-                            return None
-                    else:
-                        print(f"   ⚠️ AAA table may not be fully loaded: {e}")
-                
-                # Extract AAA data
-                aaa_data = self.extract_aaa_data_from_driver(driver)
-                
-                if aaa_data:
-                    print("🎉 Successfully extracted AAA data!")
-                    return aaa_data
-                else:
-                    print("❌ Failed to extract AAA data")
-                    if attempt < max_retries - 1:
-                        print("   🔄 Retrying...")
-                        time.sleep(5)
-                        continue
-                    else:
-                        return None
-                        
+                driver.execute_cdp_cmd(
+                    "Browser.grantPermissions",
+                    {
+                        "origin": "https://fuelinsights.gasbuddy.com/",
+                        "permissions": ["geolocation"],
+                    }
+                )
+                print("   ✅ Geolocation permissions granted")
             except Exception as e:
-                print(f"❌ Error in AAA scraping (attempt {attempt + 1}): {e}")
-                if attempt < max_retries - 1:
-                    print("   🔄 Retrying...")
-                    time.sleep(5)
-                    continue
-                else:
-                    return None
-                    
-            finally:
-                # Clean up driver
-                if driver:
-                    print("🔒 Closing Chrome driver...")
-                    try:
-                        driver.quit()
-                    except Exception as e:
-                        print(f"⚠️ Warning during driver cleanup: {e}")
-                    self.driver = None
+                print(f"   ⚠️ Could not grant permissions: {e}")
+            
+            # Set the geolocation coordinates
+            try:
+                driver.execute_cdp_cmd(
+                    "Emulation.setGeolocationOverride",
+                    {
+                        "latitude": selected_city['lat'],
+                        "longitude": selected_city['lng'],
+                        "accuracy": 100,
+                    }
+                )
+                print("   ✅ Geolocation coordinates set")
+            except Exception as e:
+                print(f"   ⚠️ Could not set coordinates: {e}")
+            
+            # Small delay to ensure CDP commands are processed
+            time.sleep(1)
+            
+            # Navigate to GasBuddy AFTER setting permissions
+            target_url = "https://fuelinsights.gasbuddy.com/"
+            print(f"🌐 Navigating to: {target_url}")
+            driver.get(target_url)
+            
+            # Wait for SPA to load - longer wait since it's an SPA
+            print("⏳ Waiting for SPA to load...")
+            time.sleep(8)
+            
+            # Try to wait for specific elements to appear
+            try:
+                from selenium.webdriver.support.ui import WebDriverWait
+                from selenium.webdriver.support import expected_conditions as EC
                 
-                # Force cleanup of Chrome processes
-                self.cleanup_chrome_processes()
-        
-        return None
+                # Wait for the application host to have content
+                WebDriverWait(driver, 15).until(
+                    lambda driver: len(driver.find_element(By.ID, "applicationHost").text) > 100
+                )
+                print("   ✅ SPA content loaded")
+            except Exception as e:
+                print(f"   ⚠️ SPA content may not be fully loaded: {e}")
+            
+            # Extract gas price data
+            gas_data = self.extract_gasbuddy_data_from_driver(driver)
+            
+            if gas_data:
+                print("🎉 Successfully extracted GasBuddy data!")
+                return gas_data
+            else:
+                print("❌ Failed to extract GasBuddy data")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in GasBuddy scraping: {e}")
+            return None
+    
+    def scrape_aaa(self):
+        """Scrape AAA Gas Prices using the proven GasBuddy pattern"""
+        driver = None
+        try:
+            print("🚗 Starting AAA scraping...")
+            
+            # Setup Chrome driver
+            if not self.setup_chrome_driver():
+                print("❌ Failed to setup Chrome driver")
+                return None
+            
+            # Store reference to driver
+            driver = self.driver
+            
+            # Navigate to AAA (simple navigation like GasBuddy)
+            target_url = "https://gasprices.aaa.com/"
+            print(f"🌐 Navigating to: {target_url}")
+            driver.get(target_url)
+            
+            # Wait for page to load (like GasBuddy does)
+            print("⏳ Waiting for page to load...")
+            time.sleep(8)
+            
+            # Try to wait for specific elements to appear (like GasBuddy does)
+            try:
+                from selenium.webdriver.support.ui import WebDriverWait
+                from selenium.webdriver.support import expected_conditions as EC
+                
+                # Wait for the tbody element to have content
+                WebDriverWait(driver, 15).until(
+                    lambda driver: len(driver.find_element(By.TAG_NAME, "tbody").text) > 50
+                )
+                print("   ✅ AAA table data loaded")
+            except Exception as e:
+                print(f"   ⚠️ AAA table may not be fully loaded: {e}")
+            
+            # Extract AAA data
+            aaa_data = self.extract_aaa_data_from_driver(driver)
+            
+            if aaa_data:
+                print("🎉 Successfully extracted AAA data!")
+                return aaa_data
+            else:
+                print("❌ Failed to extract AAA data")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in AAA scraping: {e}")
+            return None
+            
+        finally:
+            # Clean up driver AFTER data extraction (like GasBuddy does)
+            if driver:
+                print("🔒 Closing Chrome driver...")
+                try:
+                    driver.quit()
+                except Exception as e:
+                    print(f"⚠️ Warning during driver cleanup: {e}")
+                self.driver = None
+            
+            # Force cleanup of Chrome processes
+            self.cleanup_chrome_processes()
+    
+    def scrape_aaa_with_driver(self, driver):
+        """Scrape AAA Gas Prices using provided driver"""
+        try:
+            print("🚗 Starting AAA scraping with provided driver...")
+            
+            # Navigate to AAA (simple navigation like GasBuddy)
+            target_url = "https://gasprices.aaa.com/"
+            print(f"🌐 Navigating to: {target_url}")
+            driver.get(target_url)
+            
+            # Wait for page to load (like GasBuddy does)
+            print("⏳ Waiting for page to load...")
+            time.sleep(8)
+            
+            # Try to wait for specific elements to appear (like GasBuddy does)
+            try:
+                from selenium.webdriver.support.ui import WebDriverWait
+                from selenium.webdriver.support import expected_conditions as EC
+                
+                # Wait for the tbody element to have content
+                WebDriverWait(driver, 15).until(
+                    lambda driver: len(driver.find_element(By.TAG_NAME, "tbody").text) > 50
+                )
+                print("   ✅ AAA table data loaded")
+            except Exception as e:
+                print(f"   ⚠️ AAA table may not be fully loaded: {e}")
+            
+            # Extract AAA data
+            aaa_data = self.extract_aaa_data_from_driver(driver)
+            
+            if aaa_data:
+                print("🎉 Successfully extracted AAA data!")
+                return aaa_data
+            else:
+                print("❌ Failed to extract AAA data")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in AAA scraping: {e}")
+            return None
+
+
+
+
     
     def set_location_permissions_and_coordinates(self):
         """Set geolocation permissions and coordinates using CDP"""
@@ -886,6 +948,34 @@ class GasScraper:
             # Force cleanup of Chrome processes
             self.cleanup_chrome_processes()
     
+    def scrape_rbob_with_driver(self, driver):
+        """Scrape RBOB Futures from MarketWatch using provided driver"""
+        try:
+            print("⛽ Starting RBOB futures scraping with provided driver...")
+            
+            # Navigate to MarketWatch RBOB futures
+            target_url = "https://www.marketwatch.com/investing/future/rb.1"
+            print(f"🌐 Navigating to: {target_url}")
+            driver.get(target_url)
+            
+            # Wait for page to load
+            print("⏳ Waiting for page to load...")
+            time.sleep(5)
+            
+            # Extract RBOB data
+            rbob_data = self.extract_rbob_data()
+            
+            if rbob_data:
+                print("🎉 Successfully extracted RBOB data!")
+                return rbob_data
+            else:
+                print("❌ Failed to extract RBOB data")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in RBOB scraping: {e}")
+            return None
+    
     def extract_rbob_data(self):
         """Extract RBOB futures data from MarketWatch"""
         try:
@@ -1028,6 +1118,34 @@ class GasScraper:
                 except Exception as e:
                     print(f"⚠️ Warning during driver cleanup: {e}")
                 self.driver = None
+    
+    def scrape_wti_with_driver(self, driver):
+        """Scrape WTI Crude Oil Futures from MarketWatch using provided driver"""
+        try:
+            print("🛢️ Starting WTI crude oil futures scraping with provided driver...")
+            
+            # Navigate to MarketWatch WTI futures
+            target_url = "https://www.marketwatch.com/investing/future/cl.1"
+            print(f"🌐 Navigating to: {target_url}")
+            driver.get(target_url)
+            
+            # Wait for page to load
+            print("⏳ Waiting for page to load...")
+            time.sleep(5)
+            
+            # Extract WTI data
+            wti_data = self.extract_wti_data()
+            
+            if wti_data:
+                print("🎉 Successfully extracted WTI data!")
+                return wti_data
+            else:
+                print("❌ Failed to extract WTI data")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in WTI scraping: {e}")
+            return None
     
     def extract_wti_data(self):
         """Extract WTI crude oil futures data from MarketWatch"""
@@ -1172,6 +1290,34 @@ class GasScraper:
                     print(f"⚠️ Warning during driver cleanup: {e}")
                 self.driver = None
     
+    def scrape_gasoline_stocks_with_driver(self, driver):
+        """Scrape Gasoline Stocks Change from Trading Economics using provided driver"""
+        try:
+            print("⛽ Starting Gasoline Stocks Change scraping with provided driver...")
+            
+            # Navigate to Trading Economics Gasoline Stocks Change
+            target_url = "https://tradingeconomics.com/united-states/gasoline-stocks-change"
+            print(f"🌐 Navigating to: {target_url}")
+            driver.get(target_url)
+            
+            # Wait for page to load
+            print("⏳ Waiting for page to load...")
+            time.sleep(8)
+            
+            # Extract Gasoline Stocks data
+            stocks_data = self.extract_gasoline_stocks_data()
+            
+            if stocks_data:
+                print("🎉 Successfully extracted Gasoline Stocks data!")
+                return stocks_data
+            else:
+                print("❌ Failed to extract Gasoline Stocks data")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in Gasoline Stocks scraping: {e}")
+            return None
+    
     def extract_gasoline_stocks_data(self):
         """Extract Gasoline Stocks Change data from Trading Economics"""
         try:
@@ -1306,6 +1452,34 @@ class GasScraper:
                     print(f"⚠️ Warning during driver cleanup: {e}")
                 self.driver = None
     
+    def scrape_refinery_runs_with_driver(self, driver):
+        """Scrape Refinery Crude Runs from Trading Economics using provided driver"""
+        try:
+            print("🏭 Starting Refinery Crude Runs scraping with provided driver...")
+            
+            # Navigate to Trading Economics Refinery Crude Runs
+            target_url = "https://tradingeconomics.com/united-states/refinery-crude-runs"
+            print(f"🌐 Navigating to: {target_url}")
+            driver.get(target_url)
+            
+            # Wait for page to load
+            print("⏳ Waiting for page to load...")
+            time.sleep(8)
+            
+            # Extract Refinery Runs data
+            runs_data = self.extract_refinery_runs_data()
+            
+            if runs_data:
+                print("🎉 Successfully extracted Refinery Crude Runs data!")
+                return runs_data
+            else:
+                print("❌ Failed to extract Refinery Crude Runs data")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error in Refinery Runs scraping: {e}")
+            return None
+    
     def extract_refinery_runs_data(self):
         """Extract Refinery Crude Runs data from Trading Economics"""
         try:
@@ -1431,11 +1605,33 @@ class GasScraper:
         else:
             print("❌ Failed to scrape GasBuddy data")
     
+    def run_gasbuddy_job_with_driver(self, driver):
+        """Run GasBuddy scraping job using provided driver"""
+        print(f"\n--- Starting GasBuddy scraping job at {datetime.now()} ---")
+        
+        gas_data = self.scrape_gasbuddy_with_driver(driver)
+        if gas_data:
+            self.save_to_database(gas_data)
+            print(f"🎯 GasBuddy: ${gas_data['price']} at {gas_data['timestamp']}")
+        else:
+            print("❌ Failed to scrape GasBuddy data")
+    
     def run_aaa_job(self):
         """Run AAA scraping job"""
         print(f"\n--- Starting AAA scraping job at {datetime.now()} ---")
         
         aaa_data = self.scrape_aaa()
+        if aaa_data:
+            self.save_to_database(aaa_data)
+            print(f"🎯 AAA: Extracted current price: ${aaa_data['price']}")
+        else:
+            print("❌ Failed to scrape AAA data")
+    
+    def run_aaa_job_with_driver(self, driver):
+        """Run AAA scraping job using provided driver"""
+        print(f"\n--- Starting AAA scraping job at {datetime.now()} ---")
+        
+        aaa_data = self.scrape_aaa_with_driver(driver)
         if aaa_data:
             self.save_to_database(aaa_data)
             print(f"🎯 AAA: Extracted current price: ${aaa_data['price']}")
@@ -1453,11 +1649,33 @@ class GasScraper:
         else:
             print("❌ Failed to scrape RBOB data")
     
+    def run_rbob_job_with_driver(self, driver):
+        """Run RBOB futures scraping job using provided driver"""
+        print(f"\n--- Starting RBOB futures scraping job at {datetime.now()} ---")
+        
+        rbob_data = self.scrape_rbob_with_driver(driver)
+        if rbob_data:
+            self.save_to_database(rbob_data)
+            print(f"🎯 RBOB: ${rbob_data['price']} at {rbob_data['timestamp']}")
+        else:
+            print("❌ Failed to scrape RBOB data")
+    
     def run_wti_job(self):
         """Run WTI crude oil futures scraping job"""
         print(f"\n--- Starting WTI crude oil futures scraping job at {datetime.now()} ---")
         
         wti_data = self.scrape_wti()
+        if wti_data:
+            self.save_to_database(wti_data)
+            print(f"🎯 WTI: ${wti_data['price']} at {wti_data['timestamp']}")
+        else:
+            print("❌ Failed to scrape WTI data")
+    
+    def run_wti_job_with_driver(self, driver):
+        """Run WTI crude oil futures scraping job using provided driver"""
+        print(f"\n--- Starting WTI crude oil futures scraping job at {datetime.now()} ---")
+        
+        wti_data = self.scrape_wti_with_driver(driver)
         if wti_data:
             self.save_to_database(wti_data)
             print(f"🎯 WTI: ${wti_data['price']} at {wti_data['timestamp']}")
@@ -1475,11 +1693,33 @@ class GasScraper:
         else:
             print("❌ Failed to scrape Gasoline Stocks data")
     
+    def run_gasoline_stocks_job_with_driver(self, driver):
+        """Run Gasoline Stocks Change scraping job using provided driver"""
+        print(f"\n--- Starting Gasoline Stocks Change scraping job at {datetime.now()} ---")
+        
+        stocks_data = self.scrape_gasoline_stocks_with_driver(driver)
+        if stocks_data:
+            self.save_to_database(stocks_data)
+            print(f"🎯 Gasoline Stocks: {stocks_data['price']}M at {stocks_data['timestamp']}")
+        else:
+            print("❌ Failed to scrape Gasoline Stocks data")
+    
     def run_refinery_runs_job(self):
         """Run Refinery Crude Runs scraping job"""
         print(f"\n--- Starting Refinery Crude Runs scraping job at {datetime.now()} ---")
         
         runs_data = self.scrape_refinery_runs()
+        if runs_data:
+            self.save_to_database(runs_data)
+            print(f"🎯 Refinery Runs: {runs_data['price']}M at {runs_data['timestamp']}")
+        else:
+            print("❌ Failed to scrape Refinery Runs data")
+    
+    def run_refinery_runs_job_with_driver(self, driver):
+        """Run Refinery Crude Runs scraping job using provided driver"""
+        print(f"\n--- Starting Refinery Crude Runs scraping job at {datetime.now()} ---")
+        
+        runs_data = self.scrape_refinery_runs_with_driver(driver)
         if runs_data:
             self.save_to_database(runs_data)
             print(f"🎯 Refinery Runs: {runs_data['price']}M at {runs_data['timestamp']}")
@@ -1499,25 +1739,51 @@ class GasScraper:
             print(f"❌ Daily backup failed: {e}")
     
     def run_all_sources_once(self):
-        """Run all data sources once immediately"""
+        """Run all data sources once immediately using single persistent driver"""
         print(f"\n--- Running all sources once at {datetime.now()} ---")
         
         try:
-            print("🔄 Running all sources...")
-            self.run_gasbuddy_job()
-            time.sleep(5)  # Longer delay to ensure Chrome cleanup
-            self.run_aaa_job()
-            time.sleep(5)  # Longer delay to ensure Chrome cleanup
-            self.run_rbob_job()
-            time.sleep(5)  # Longer delay to ensure Chrome cleanup
-            self.run_wti_job()
-            time.sleep(5)  # Longer delay to ensure Chrome cleanup
-            self.run_gasoline_stocks_job()
-            time.sleep(5)  # Longer delay to ensure Chrome cleanup
-            self.run_refinery_runs_job()
-            print("✅ All sources completed successfully!")
+            print("🔄 Running all sources with single persistent driver...")
+            
+            # Setup single Chrome driver for all jobs
+            if not self.setup_chrome_driver():
+                print("❌ Failed to setup Chrome driver")
+                return
+            
+            print("✅ Single Chrome driver established - will reuse for all jobs")
+            
+            # Run all jobs using the same driver
+            self.run_gasbuddy_job_with_driver(self.driver)
+            time.sleep(3)  # Short delay between jobs
+            
+            self.run_aaa_job_with_driver(self.driver)
+            time.sleep(3)  # Short delay between jobs
+            
+            self.run_rbob_job_with_driver(self.driver)
+            time.sleep(3)  # Short delay between jobs
+            
+            self.run_wti_job_with_driver(self.driver)
+            time.sleep(3)  # Short delay between jobs
+            
+            self.run_gasoline_stocks_job_with_driver(self.driver)
+            time.sleep(3)  # Short delay between jobs
+            
+            self.run_refinery_runs_job_with_driver(self.driver)
+            
+            print("✅ All sources completed successfully with single driver!")
+            
         except Exception as e:
             print(f"❌ Error running all sources: {e}")
+        finally:
+            # Only quit the driver at the very end
+            if self.driver:
+                print("🔒 Closing persistent Chrome driver...")
+                try:
+                    self.driver.quit()
+                except Exception as e:
+                    print(f"⚠️ Warning during driver cleanup: {e}")
+                self.driver = None
+                self.cleanup_chrome_processes()
     
     def get_latest_prices(self, limit=20):
         """Retrieve the latest gas prices from the database"""
