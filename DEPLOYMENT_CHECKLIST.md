@@ -1,11 +1,11 @@
-# 🚀 Railway Deployment Checklist
+# 🚀 Railway Deployment Checklist (Playwright Version)
 
 ## ✅ Pre-Deployment Checklist
 
 ### 1. Files Updated ✅
-- [x] `gas_scraper.py` - Enhanced with Railway-optimized Chrome options
-- [x] `requirements.txt` - All dependencies properly specified
-- [x] `nixpacks.toml` - Railway build configuration for scraper service
+- [x] `gas_scraper.py` - **UPDATED**: Now uses Playwright instead of Selenium
+- [x] `requirements.txt` - **UPDATED**: Added `playwright>=1.40.0` and `playwright-browser-chromium`
+- [x] `nixpacks.toml` - **UPDATED**: Added `playwright install chromium` command
 - [x] `nixpacks_dashboard.toml` - Railway build configuration for dashboard service
 - [x] `railway.json` - Railway configuration for scraper service
 - [x] `railway_dashboard.json` - Railway configuration for dashboard service
@@ -15,38 +15,39 @@
 - [x] **Scraper Service**: Uses `railway.json` + `nixpacks.toml`
 - [x] **Dashboard Service**: Uses `railway_dashboard.json` + `nixpacks_dashboard.toml`
 - [x] Both use `NIXPACKS` builder
-- [x] Scraper includes `chromium` and `chromedriver` packages
+- [x] **UPDATED**: Scraper now uses Playwright + Chromium instead of Selenium
 - [x] Dashboard uses lightweight configuration
 - [x] Proper Python 3.11 environment
 - [x] PostgreSQL development headers included (scraper only)
 
-### 3. Chrome Options for Railway ✅
-- [x] `--no-sandbox` - Required for Railway
-- [x] `--disable-dev-shm-usage` - Memory optimization
-- [x] `--single-process` - Resource optimization
-- [x] `--disable-web-security` - Railway compatibility
-- [x] Additional stability options added
+### 3. Playwright Configuration for Railway ✅
+- [x] **NEW**: `playwright>=1.40.0` in requirements.txt
+- [x] **NEW**: `playwright install chromium` in Nixpacks build
+- [x] **NEW**: Chromium browser for Railway compatibility
+- [x] **NEW**: Anti-detection features for better scraping success
+- [x] **NEW**: Fresh browser context per job for stability
 
 ## 🚀 Deployment Instructions
 
 ### Two-Service Setup (Current Configuration)
 You have **two separate Railway services** from the same repository:
 
-#### Service 1: Gas Scraper (Background Service)
+#### Service 1: Gas Scraper (Background Service) - **UPDATED TO PLAYWRIGHT**
 - **Configuration**: `railway.json` + `nixpacks.toml`
-- **Purpose**: Runs continuously, scraping gas price data
+- **Purpose**: Runs continuously, scraping gas price data using Playwright
 - **Start Command**: `python run_scraper.py`
-- **Dependencies**: Chrome, PostgreSQL, all Python packages
+- **Dependencies**: **Playwright + Chromium**, PostgreSQL, all Python packages
 
 #### Service 2: Web Dashboard (Web Service)
 - **Configuration**: `railway_dashboard.json` + `nixpacks_dashboard.toml`
 - **Purpose**: Provides web interface for viewing scraped data
 - **Start Command**: `streamlit run dashboard.py`
-- **Dependencies**: Lightweight, no Chrome needed
+- **Dependencies**: Lightweight, no browser dependencies needed
 
 ### Deployment Steps
 1. **Deploy Scraper Service**:
    - Railway will use `railway.json` → `nixpacks.toml`
+   - **NEW**: Playwright will install Chromium browser automatically
    - Service runs in background, scraping data continuously
 
 2. **Deploy Dashboard Service**:
@@ -57,6 +58,7 @@ You have **two separate Railway services** from the same repository:
 
 ### Scraper Service
 - `DATABASE_URL` - Your PostgreSQL connection string
+- `NONINTERACTIVE=1` - For headless operation
 
 ### Dashboard Service
 - `PORT` - Railway will set this automatically
@@ -64,11 +66,11 @@ You have **two separate Railway services** from the same repository:
 
 ## 📊 Monitoring Deployment
 
-### Scraper Service
-1. **Check Build Logs**: Ensure Chrome and all packages install correctly
-2. **Check Runtime Logs**: Look for Chrome startup messages
-3. **Verify Database Connection**: Should see "Connected to PostgreSQL database"
-4. **Monitor Scraping Jobs**: Should see job execution logs
+### Scraper Service - **UPDATED FOR PLAYWRIGHT**
+1. **Check Build Logs**: Ensure Playwright and Chromium install correctly
+2. **Check Runtime Logs**: Look for Playwright startup messages
+3. **Verify Database Connection**: Should see "✅ DB OK @ [timestamp]"
+4. **Monitor Scraping Jobs**: Should see Playwright-based job execution logs
 
 ### Dashboard Service
 1. **Check Build Logs**: Ensure Python packages install correctly
@@ -76,34 +78,42 @@ You have **two separate Railway services** from the same repository:
 3. **Verify Web Access**: Should be accessible via Railway URL
 4. **Test Database Connection**: Should display scraped data
 
-## 🚨 Common Issues & Solutions
+## 🚨 Common Issues & Solutions - **UPDATED FOR PLAYWRIGHT**
 
-### Chrome Crashes (Scraper Service)
-- ✅ Already fixed with enhanced Chrome options
-- ✅ Single-process mode for Railway compatibility
+### **NEW**: Playwright Not Found Error
+- **Issue**: `ModuleNotFoundError: No module named 'playwright'`
+- **Solution**: ✅ Fixed - Added `playwright>=1.40.0` to requirements.txt
+- **Solution**: ✅ Fixed - Added `playwright install chromium` to Nixpacks
 
-### DevTools Disconnection (Scraper Service)
-- ✅ Already fixed with fresh driver per job strategy
-- ✅ Enhanced error handling and retry logic
+### **NEW**: Chromium Browser Not Installed
+- **Issue**: Playwright can't find Chromium browser
+- **Solution**: ✅ Fixed - Nixpacks runs `playwright install chromium` automatically
 
-### Memory Issues (Scraper Service)
-- ✅ Memory pressure disabled
-- ✅ Old space size increased to 4GB
-- ✅ Single process mode for stability
+### **UPDATED**: Browser Stability Issues
+- **Issue**: Browser crashes or disconnections
+- **Solution**: ✅ Fixed - Playwright is more stable than Selenium in cloud environments
+- **Solution**: ✅ Fixed - Fresh browser context per job strategy
+
+### **UPDATED**: Memory Issues
+- **Issue**: High memory usage
+- **Solution**: ✅ Fixed - Playwright has better memory management than Selenium
+- **Solution**: ✅ Fixed - Contexts are properly closed after each job
 
 ### Dashboard Issues
 - ✅ Lightweight configuration for web service
-- ✅ No Chrome dependencies
+- ✅ No browser dependencies
 - ✅ Proper Streamlit configuration
 
-## 🎯 Expected Behavior
+## 🎯 Expected Behavior - **UPDATED FOR PLAYWRIGHT**
 
 ### After Scraper Deployment:
-1. ✅ Database connection established
-2. ✅ Chrome driver setup successful
-3. ✅ Scraping jobs running on schedule
-4. ✅ Data being saved to PostgreSQL
-5. ✅ No more DevTools disconnection errors
+1. ✅ **NEW**: Playwright package installed successfully
+2. ✅ **NEW**: Chromium browser installed by Playwright
+3. ✅ Database connection established
+4. ✅ **NEW**: Playwright browser setup successful
+5. ✅ Scraping jobs running on schedule using Playwright
+6. ✅ Data being saved to PostgreSQL
+7. ✅ **NEW**: No more DevTools disconnection errors (Playwright handles this better)
 
 ### After Dashboard Deployment:
 1. ✅ Streamlit service started successfully
@@ -116,16 +126,36 @@ You have **two separate Railway services** from the same repository:
 When you push updates:
 1. **Scraper Service**: Railway automatically rebuilds using `railway.json` → `nixpacks.toml`
 2. **Dashboard Service**: Railway automatically rebuilds using `railway_dashboard.json` → `nixpacks_dashboard.toml`
-3. New Chrome options take effect in scraper
-4. Enhanced stability features are active
-5. All scraping jobs use fresh driver strategy
+3. **NEW**: Playwright and Chromium are automatically installed
+4. **NEW**: Enhanced Playwright-based scraping takes effect
+5. **NEW**: All scraping jobs use fresh browser context strategy
+6. **NEW**: Better stability and anti-detection features are active
 
-## 📝 Notes
+## 📝 Key Changes Made
 
-- **Scraper Service**: Runs continuously in the background, each scraping job gets a fresh Chrome driver
-- **Dashboard Service**: Lightweight web service for viewing scraped data
-- **Enhanced Error Handling**: Prevents crashes and DevTools disconnections
-- **Railway-Optimized**: Chrome options ensure stability in cloud environment
-- **PostgreSQL Connection**: Tested before starting scraper service
+### **Migration from Selenium to Playwright**:
+- ✅ **Replaced**: Selenium WebDriver with Playwright
+- ✅ **Replaced**: ChromeDriver with Playwright's built-in Chromium
+- ✅ **Replaced**: Selenium-specific error handling with Playwright error handling
+- ✅ **Added**: Anti-detection features for better scraping success
+- ✅ **Added**: Fresh browser context per job for stability
 
-Your two-service Railway deployment should now work reliably! 🎉
+### **Dependencies Updated**:
+- ✅ **Added**: `playwright>=1.40.0` to requirements.txt
+- ✅ **Added**: `playwright-browser-chromium>=1.40.0` to requirements.txt
+- ✅ **Added**: `playwright install chromium` to Nixpacks build process
+
+### **Configuration Updated**:
+- ✅ **Updated**: Nixpacks to install Playwright browsers
+- ✅ **Updated**: Browser launch arguments for Railway compatibility
+- ✅ **Updated**: Error handling for Playwright-specific exceptions
+
+## 🎉 Benefits of Playwright Migration
+
+1. **Better Cloud Stability**: Playwright handles cloud environments better than Selenium
+2. **Built-in Browser Management**: No need for separate ChromeDriver installation
+3. **Enhanced Anti-Detection**: Better at avoiding bot detection
+4. **Improved Error Handling**: More robust error handling and recovery
+5. **Resource Efficiency**: Better memory and process management
+
+Your two-service Railway deployment should now work reliably with Playwright! 🚀
