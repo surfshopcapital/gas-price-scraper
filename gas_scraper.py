@@ -124,91 +124,107 @@ class GasScraper:
             try:
                 print("   🔍 Looking for Chrome binary...")
                 
-                # Debug: Check what's actually in the system
-                print("   🔍 Debugging system paths...")
+                # Use Python's built-in capabilities instead of system commands
+                import os
+                import glob
                 
-                # Check PATH and common directories
+                print("   🔍 Using Python-based Chrome detection...")
+                
+                # Method 1: Try to use Chrome directly without specifying binary location
                 try:
-                    result = subprocess.run(['echo', '$PATH'], capture_output=True, text=True, shell=True)
-                    print(f"   📍 PATH: {result.stdout.strip()}")
-                except:
-                    print("   📍 Could not check PATH")
+                    print("   🔍 Attempting to create Chrome driver without binary specification...")
+                    self.driver = webdriver.Chrome(options=options)
+                    print("   ✅ Chrome driver created successfully without binary specification")
+                    return self.driver
+                except Exception as e:
+                    print(f"   ⚠️ Direct Chrome creation failed: {e}")
                 
-                # Check what's in /usr/bin
-                try:
-                    result = subprocess.run(['ls', '-la', '/usr/bin/'], capture_output=True, text=True)
-                    chrome_files = [line for line in result.stdout.split('\n') if 'chrome' in line.lower() or 'chromium' in line.lower()]
-                    if chrome_files:
-                        print(f"   📍 Chrome files in /usr/bin: {chrome_files}")
-                    else:
-                        print("   📍 No Chrome files found in /usr/bin")
-                except:
-                    print("   📍 Could not check /usr/bin")
+                # Method 2: Search for Chrome in common nix store patterns using Python
+                print("   🔍 Searching for Chrome in nix store patterns...")
                 
-                # Check nix store for chromium
-                try:
-                    result = subprocess.run(['find', '/nix/store', '-name', 'chromium', '-type', 'f'], capture_output=True, text=True)
-                    if result.stdout.strip():
-                        chromium_paths = result.stdout.strip().split('\n')
-                        print(f"   📍 Found chromium in nix store: {chromium_paths}")
-                    else:
-                        print("   📍 No chromium found in nix store")
-                except:
-                    print("   📍 Could not search nix store")
-                
-                # Check nix store for chromedriver
-                try:
-                    result = subprocess.run(['find', '/nix/store', '-name', 'chromedriver', '-type', 'f'], capture_output=True, text=True)
-                    if result.stdout.strip():
-                        chromedriver_paths = result.stdout.strip().split('\n')
-                        print(f"   📍 Found chromedriver in nix store: {chromedriver_paths}")
-                    else:
-                        print("   📍 No chromedriver found in nix store")
-                except:
-                    print("   📍 Could not search nix store")
-                
-                # Common Chrome/Chromium paths in Railway/nixpacks environment
-                chrome_paths = [
-                    "/nix/store/*/chromium/bin/chromium",
-                    "/usr/bin/chromium",
-                    "/usr/bin/chromium-browser",
-                    "/usr/bin/google-chrome",
-                    "/usr/bin/google-chrome-stable"
+                # Common nix store patterns for chromium
+                nix_patterns = [
+                    "/nix/store/*/chromium*/bin/chromium",
+                    "/nix/store/*/chromium*/bin/chromium-browser",
+                    "/nix/store/*/chromium*/bin/google-chrome",
+                    "/nix/store/*/chromium*/bin/google-chrome-stable"
                 ]
                 
-                # Try to find an available Chrome binary
-                import subprocess
-                import glob
                 chrome_found = False
-                
-                for chrome_path in chrome_paths:
-                    if '*' in chrome_path:
-                        # Handle wildcard paths (nixpacks)
-                        expanded_paths = glob.glob(chrome_path)
-                        print(f"   🔍 Expanded path '{chrome_path}' to: {expanded_paths}")
+                for pattern in nix_patterns:
+                    try:
+                        expanded_paths = glob.glob(pattern)
+                        print(f"   🔍 Pattern '{pattern}' expanded to: {expanded_paths}")
+                        
                         for expanded_path in expanded_paths:
-                            if subprocess.run(['test', '-f', expanded_path], capture_output=True).returncode == 0:
+                            # Check if file exists using Python's os.path
+                            if os.path.isfile(expanded_path):
+                                print(f"   ✅ Found Chrome binary at: {expanded_path}")
                                 options.binary_location = expanded_path
-                                print(f"   🔍 Found Chrome at: {expanded_path}")
                                 chrome_found = True
                                 break
+                        
                         if chrome_found:
                             break
-                    else:
-                        # Handle direct paths
-                        if subprocess.run(['test', '-f', chrome_path], capture_output=True).returncode == 0:
+                    except Exception as e:
+                        print(f"   ⚠️ Error with pattern '{pattern}': {e}")
+                        continue
+                
+                # Method 3: Try common Linux paths
+                if not chrome_found:
+                    print("   🔍 Trying common Linux Chrome paths...")
+                    common_paths = [
+                        "/usr/bin/chromium",
+                        "/usr/bin/chromium-browser",
+                        "/usr/bin/google-chrome",
+                        "/usr/bin/google-chrome-stable",
+                        "/snap/bin/chromium",
+                        "/opt/google/chrome/chrome"
+                    ]
+                    
+                    for chrome_path in common_paths:
+                        if os.path.isfile(chrome_path):
+                            print(f"   ✅ Found Chrome at: {chrome_path}")
                             options.binary_location = chrome_path
-                            print(f"   🔍 Found Chrome at: {chrome_path}")
                             chrome_found = True
                             break
                 
+                # Method 4: Try to find chromedriver in PATH
+                if not chrome_found:
+                    print("   🔍 Trying to find chromedriver in system...")
+                    try:
+                        # Let Selenium find chromedriver automatically
+                        self.driver = webdriver.Chrome(options=options)
+                        print("   ✅ Chrome driver created with auto-detected chromedriver")
+                        return self.driver
+                    except Exception as e:
+                        print(f"   ⚠️ Auto-detection failed: {e}")
+                
                 if not chrome_found:
                     print("   ❌ Chrome binary not found in any expected location")
-                    return None
+                    
+                    # Final fallback: Try webdriver-manager
+                    print("   🔄 Trying webdriver-manager as final fallback...")
+                    try:
+                        from webdriver_manager.chrome import ChromeDriverManager
+                        from selenium.webdriver.chrome.service import Service
+                        
+                        print("   📥 Downloading ChromeDriver automatically...")
+                        service = Service(ChromeDriverManager().install())
+                        self.driver = webdriver.Chrome(service=service, options=options)
+                        print("   ✅ Chrome driver created successfully with webdriver-manager")
+                        return self.driver
+                    except Exception as e:
+                        print(f"   ❌ Webdriver-manager fallback failed: {e}")
+                        return None
                 
                 # Create Chrome driver with found binary
-                self.driver = webdriver.Chrome(options=options)
-                print("   ✅ Chrome driver created successfully")
+                try:
+                    self.driver = webdriver.Chrome(options=options)
+                    print("   ✅ Chrome driver created successfully")
+                except Exception as e:
+                    print(f"   ❌ Failed to create Chrome driver with binary: {e}")
+                    return None
             except Exception as e:
                 print(f"   ❌ ChromeDriver setup failed: {e}")
                 return None

@@ -1,5 +1,6 @@
 # Web scraping and browser automation
 selenium==4.15.2
+webdriver-manager==4.0.1
 
 # Task scheduling
 schedule==1.2.0
