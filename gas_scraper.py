@@ -81,6 +81,22 @@ class GasScraper:
         except Exception as e:
             print(f"   ⚠️ Chrome cleanup warning: {e}")
     
+    def is_driver_responsive(self, driver):
+        """Check if Chrome driver is still responsive and connected to DevTools"""
+        try:
+            if not driver:
+                return False
+            
+            # Try to get page title - this will fail if DevTools is disconnected
+            title = driver.title
+            return True
+        except Exception as e:
+            if "disconnected: not connected to DevTools" in str(e):
+                return False
+            else:
+                # Other errors might be recoverable
+                return True
+    
     def setup_chrome_driver(self):
         """Set up Chrome driver with CDP capabilities"""
         try:
@@ -97,7 +113,177 @@ class GasScraper:
             # Force cleanup of Chrome processes
             self.cleanup_chrome_processes()
             
+            # Add a small delay to ensure cleanup is complete
+            time.sleep(2)
+            
             options = Options()
+            
+            if self.headless:
+                print("   👻 Running in headless mode")
+                options.add_argument('--headless')
+            else:
+                print("   📱 Running in visible mode")
+            
+            # Anti-detection options
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--disable-blink-features=AutomationControlled')
+            options.add_argument('--disable-extensions')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--disable-plugins')
+            options.add_argument('--disable-images')
+            # options.add_argument('--disable-javascript')  # Commented out - needed for dynamic content
+            
+            # User agent to look more human
+            options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            
+            print("   🚀 Launching Chrome...")
+            
+            # Find Chrome binary and set up ChromeDriver for Railway environment
+            try:
+                print("   🔍 Looking for Chrome binary...")
+                
+                # Use Python's built-in capabilities instead of system commands
+                import os
+                import glob
+                
+                print("   🔍 Using Python-based Chrome detection...")
+                
+                # Method 1: Try to use Chrome directly without specifying binary location
+                try:
+                    print("   🔍 Attempting to create Chrome driver without binary specification...")
+                    self.driver = webdriver.Chrome(options=options)
+                    print("   ✅ Chrome driver created successfully without binary specification")
+                    return self.driver
+                except Exception as e:
+                    print(f"   ⚠️ Direct Chrome creation failed: {e}")
+                
+                # Method 2: Search for Chrome in common nix store patterns using Python
+                print("   🔍 Searching for Chrome in nix store patterns...")
+                
+                # Common nix store patterns for chromium
+                nix_patterns = [
+                    "/nix/store/*/chromium*/bin/chromium",
+                    "/nix/store/*/chromium*/bin/chromium-browser",
+                    "/nix/store/*/chromium*/bin/google-chrome",
+                    "/nix/store/*/chromium*/bin/google-chrome-stable"
+                ]
+                
+                chrome_found = False
+                for pattern in nix_patterns:
+                    try:
+                        expanded_paths = glob.glob(pattern)
+                        print(f"   🔍 Pattern '{pattern}' expanded to: {expanded_paths}")
+                        
+                        for expanded_path in expanded_paths:
+                            # Check if file exists using Python's os.path
+                            if os.path.isfile(expanded_path):
+                                print(f"   ✅ Found Chrome binary at: {expanded_path}")
+                                options.binary_location = expanded_path
+                                chrome_found = True
+                                break
+                        
+                        if chrome_found:
+                            break
+                    except Exception as e:
+                        print(f"   ⚠️ Error with pattern '{pattern}': {e}")
+                        continue
+                
+                # Method 3: Try common Linux paths
+                if not chrome_found:
+                    print("   🔍 Trying common Linux Chrome paths...")
+                    common_paths = [
+                        "/usr/bin/chromium",
+                        "/usr/bin/chromium-browser",
+                        "/usr/bin/google-chrome",
+                        "/usr/bin/google-chrome-stable",
+                        "/snap/bin/chromium",
+                        "/opt/google/chrome/chrome"
+                    ]
+                    
+                    for chrome_path in common_paths:
+                        if os.path.isfile(chrome_path):
+                            print(f"   ✅ Found Chrome at: {chrome_path}")
+                            options.binary_location = chrome_path
+                            chrome_found = True
+                            break
+                
+                # Method 4: Try to find chromedriver in PATH
+                if not chrome_found:
+                    print("   🔍 Trying to find chromedriver in system...")
+                    try:
+                        # Let Selenium find chromedriver automatically
+                        self.driver = webdriver.Chrome(options=options)
+                        print("   ✅ Chrome driver created with auto-detected chromedriver")
+                        return self.driver
+                    except Exception as e:
+                        print(f"   ⚠️ Auto-detection failed: {e}")
+                
+                if not chrome_found:
+                    print("   ❌ Chrome binary not found in any expected location")
+                    
+                    # Final fallback: Try webdriver-manager
+                    print("   🔄 Trying webdriver-manager as final fallback...")
+                    try:
+                        from webdriver_manager.chrome import ChromeDriverManager
+                        from selenium.webdriver.chrome.service import Service
+                        
+                        print("   📥 Downloading ChromeDriver automatically...")
+                        service = Service(ChromeDriverManager().install())
+                        self.driver = webdriver.Chrome(service=service, options=options)
+                        print("   ✅ Chrome driver created successfully with webdriver-manager")
+                        return self.driver
+                    except Exception as e:
+                        print(f"   ❌ Webdriver-manager fallback failed: {e}")
+                        return None
+                
+                # Create Chrome driver with found binary
+                try:
+                    self.driver = webdriver.Chrome(options=options)
+                    print("   ✅ Chrome driver created successfully")
+                except Exception as e:
+                    print(f"   ❌ Failed to create Chrome driver with binary: {e}")
+                    return None
+                
+                # Set window size
+                self.driver.set_window_size(1920, 1080)
+                print("   ✅ Chrome driver setup complete")
+                
+                return self.driver
+                
+            except Exception as e:
+                print(f"   ❌ ChromeDriver setup failed: {e}")
+                return None
+            
+        except Exception as e:
+            print(f"❌ Error setting up Chrome driver: {e}")
+            return None
+    
+    def create_fresh_chrome_driver(self):
+        """Create a completely fresh Chrome driver instance"""
+        try:
+            print("🔧 Creating fresh Chrome driver...")
+            
+            # Force cleanup of any existing driver
+            if hasattr(self, 'driver') and self.driver:
+                try:
+                    self.driver.quit()
+                except:
+                    pass
+                self.driver = None
+            
+            # Force cleanup of Chrome processes
+            self.cleanup_chrome_processes()
+            
+            # Add a small delay to ensure cleanup is complete
+            time.sleep(3)
+            
+            # Create new driver
+            return self.setup_chrome_driver()
+            
+        except Exception as e:
+            print(f"❌ Error creating fresh Chrome driver: {e}")
+            return None
             
             if self.headless:
                 print("   👻 Running in headless mode")
@@ -360,74 +546,102 @@ class GasScraper:
             self.cleanup_chrome_processes()
     
     def scrape_aaa(self):
-        """Scrape AAA Gas Prices"""
-        try:
-            print("🚗 Starting AAA scraping...")
-            
-            # Setup Chrome driver
-            if not self.setup_chrome_driver():
-                print("❌ Failed to setup Chrome driver")
-                return None
-            
-            # Navigate to AAA
-            target_url = "https://gasprices.aaa.com/"
-            print(f"🌐 Navigating to: {target_url}")
-            self.driver.get(target_url)
-            
-            # Wait for page to load - longer wait for table data
-            print("⏳ Waiting for page to load...")
-            time.sleep(8)
-            
-            # Try to wait for the table to appear
+        """Scrape AAA Gas Prices with robust DevTools handling"""
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            driver = None
             try:
-                from selenium.webdriver.support.ui import WebDriverWait
-                from selenium.webdriver.support import expected_conditions as EC
+                print(f"🚗 Starting AAA scraping (attempt {attempt + 1}/{max_retries})...")
                 
-                # Wait for the tbody element to have content
-                WebDriverWait(self.driver, 15).until(
-                    lambda driver: len(driver.find_element(By.TAG_NAME, "tbody").text) > 50
-                )
-                print("   ✅ AAA table data loaded")
-            except Exception as e:
-                print(f"   ⚠️ AAA table may not be fully loaded: {e}")
-            
-            # Extract AAA data BEFORE any cleanup
-            aaa_data = self.extract_aaa_data()
-            
-            if aaa_data:
-                print("🎉 Successfully extracted AAA data!")
-                return aaa_data
-            else:
-                print("❌ Failed to extract AAA data")
-                # Try to get page source for debugging
-                try:
-                    page_source = self.driver.page_source
-                    if "Current Avg." in page_source:
-                        print("   🔍 Current Avg. text found in page source")
+                # Setup Chrome driver
+                if not self.setup_chrome_driver():
+                    print("❌ Failed to setup Chrome driver")
+                    if attempt < max_retries - 1:
+                        print("   🔄 Retrying...")
+                        time.sleep(5)
+                        continue
                     else:
-                        print("   ❌ Current Avg. text not found in page source")
-                        print(f"   📄 Page title: {self.driver.title}")
-                        print(f"   🔗 Current URL: {self.driver.current_url}")
-                except Exception as e:
-                    print(f"   ⚠️ Could not analyze page: {e}")
-                return None
+                        return None
                 
-        except Exception as e:
-            print(f"❌ Error in AAA scraping: {e}")
-            return None
-            
-        finally:
-            # Clean up driver AFTER data extraction
-            if self.driver:
-                print("🔒 Closing Chrome driver...")
+                # Store reference to driver
+                driver = self.driver
+                
+                # Navigate to AAA
+                target_url = "https://gasprices.aaa.com/"
+                print(f"🌐 Navigating to: {target_url}")
+                driver.get(target_url)
+                
+                # Wait for page to load - longer wait for table data
+                print("⏳ Waiting for page to load...")
+                time.sleep(8)
+                
+                # Try to wait for the table to appear
                 try:
-                    self.driver.quit()
+                    from selenium.webdriver.support.ui import WebDriverWait
+                    from selenium.webdriver.support import expected_conditions as EC
+                    
+                    # Wait for the tbody element to have content
+                    WebDriverWait(driver, 15).until(
+                        lambda driver: len(driver.find_element(By.TAG_NAME, "tbody").text) > 50
+                    )
+                    print("   ✅ AAA table data loaded")
+                    
                 except Exception as e:
-                    print(f"⚠️ Warning during driver cleanup: {e}")
-                self.driver = None
-            
-            # Force cleanup of Chrome processes
-            self.cleanup_chrome_processes()
+                    if "disconnected: not connected to DevTools" in str(e):
+                        print(f"   ⚠️ DevTools disconnected on attempt {attempt + 1}: {e}")
+                        if attempt < max_retries - 1:
+                            print("   🔄 Retrying with fresh driver...")
+                            try:
+                                driver.quit()
+                            except:
+                                pass
+                            time.sleep(5)
+                            continue
+                        else:
+                            print("   ❌ Max retries reached, giving up")
+                            return None
+                    else:
+                        print(f"   ⚠️ AAA table may not be fully loaded: {e}")
+                
+                # Extract AAA data
+                aaa_data = self.extract_aaa_data_from_driver(driver)
+                
+                if aaa_data:
+                    print("🎉 Successfully extracted AAA data!")
+                    return aaa_data
+                else:
+                    print("❌ Failed to extract AAA data")
+                    if attempt < max_retries - 1:
+                        print("   🔄 Retrying...")
+                        time.sleep(5)
+                        continue
+                    else:
+                        return None
+                        
+            except Exception as e:
+                print(f"❌ Error in AAA scraping (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    print("   🔄 Retrying...")
+                    time.sleep(5)
+                    continue
+                else:
+                    return None
+                    
+            finally:
+                # Clean up driver
+                if driver:
+                    print("🔒 Closing Chrome driver...")
+                    try:
+                        driver.quit()
+                    except Exception as e:
+                        print(f"⚠️ Warning during driver cleanup: {e}")
+                    self.driver = None
+                
+                # Force cleanup of Chrome processes
+                self.cleanup_chrome_processes()
+        
+        return None
     
     def set_location_permissions_and_coordinates(self):
         """Set geolocation permissions and coordinates using CDP"""
