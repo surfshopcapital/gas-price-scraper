@@ -241,6 +241,7 @@ class GasScraper:
     
     def scrape_gasbuddy(self):
         """Scrape GasBuddy Fuel Insights"""
+        driver = None
         try:
             print("🚀 Starting GasBuddy scraping...")
             
@@ -248,6 +249,9 @@ class GasScraper:
             if not self.setup_chrome_driver():
                 print("❌ Failed to setup Chrome driver")
                 return None
+            
+            # Store reference to driver
+            driver = self.driver
             
             # Set location permissions and coordinates BEFORE navigating
             print("📍 Setting geolocation permissions and coordinates...")
@@ -267,7 +271,7 @@ class GasScraper:
             
             # Grant geolocation permissions to the target domain FIRST
             try:
-                self.driver.execute_cdp_cmd(
+                driver.execute_cdp_cmd(
                     "Browser.grantPermissions",
                     {
                         "origin": "https://fuelinsights.gasbuddy.com/",
@@ -280,7 +284,7 @@ class GasScraper:
             
             # Set the geolocation coordinates
             try:
-                self.driver.execute_cdp_cmd(
+                driver.execute_cdp_cmd(
                     "Emulation.setGeolocationOverride",
                     {
                         "latitude": selected_city['lat'],
@@ -298,7 +302,7 @@ class GasScraper:
             # Navigate to GasBuddy AFTER setting permissions
             target_url = "https://fuelinsights.gasbuddy.com/"
             print(f"🌐 Navigating to: {target_url}")
-            self.driver.get(target_url)
+            driver.get(target_url)
             
             # Wait for SPA to load - longer wait since it's an SPA
             print("⏳ Waiting for SPA to load...")
@@ -310,7 +314,7 @@ class GasScraper:
                 from selenium.webdriver.support import expected_conditions as EC
                 
                 # Wait for the application host to have content
-                WebDriverWait(self.driver, 15).until(
+                WebDriverWait(driver, 15).until(
                     lambda driver: len(driver.find_element(By.ID, "applicationHost").text) > 100
                 )
                 print("   ✅ SPA content loaded")
@@ -318,7 +322,7 @@ class GasScraper:
                 print(f"   ⚠️ SPA content may not be fully loaded: {e}")
             
             # Extract gas price data
-            gas_data = self.extract_gasbuddy_data()
+            gas_data = self.extract_gasbuddy_data_from_driver(driver)
             
             if gas_data:
                 print("🎉 Successfully extracted GasBuddy data!")
@@ -327,13 +331,13 @@ class GasScraper:
                 print("❌ Failed to extract GasBuddy data")
                 # Try to get page source for debugging
                 try:
-                    page_source = self.driver.page_source
+                    page_source = driver.page_source
                     if "tickingAvgPriceText" in page_source:
                         print("   🔍 Price element ID found in page source")
                     else:
                         print("   ❌ Price element ID not found in page source")
-                        print(f"   📄 Page title: {self.driver.title}")
-                        print(f"   🔗 Current URL: {self.driver.current_url}")
+                        print(f"   📄 Page title: {driver.title}")
+                        print(f"   🔗 Current URL: {driver.current_url}")
                 except Exception as e:
                     print(f"   ⚠️ Could not analyze page: {e}")
                 return None
@@ -343,14 +347,17 @@ class GasScraper:
             return None
             
         finally:
-            # Always close the driver
-            if self.driver:
+            # Clean up driver AFTER data extraction
+            if driver:
                 print("🔒 Closing Chrome driver...")
                 try:
-                    self.driver.quit()
+                    driver.quit()
                 except Exception as e:
                     print(f"⚠️ Warning during driver cleanup: {e}")
                 self.driver = None
+            
+            # Force cleanup of Chrome processes
+            self.cleanup_chrome_processes()
     
     def scrape_aaa(self):
         """Scrape AAA Gas Prices"""
@@ -1235,15 +1242,15 @@ class GasScraper:
         try:
             print("🔄 Running all sources...")
             self.run_gasbuddy_job()
-            time.sleep(2)  # Small delay between jobs
+            time.sleep(5)  # Longer delay to ensure Chrome cleanup
             self.run_aaa_job()
-            time.sleep(2)  # Small delay between jobs
+            time.sleep(5)  # Longer delay to ensure Chrome cleanup
             self.run_rbob_job()
-            time.sleep(2)  # Small delay between jobs
+            time.sleep(5)  # Longer delay to ensure Chrome cleanup
             self.run_wti_job()
-            time.sleep(2)  # Small delay between jobs
+            time.sleep(5)  # Longer delay to ensure Chrome cleanup
             self.run_gasoline_stocks_job()
-            time.sleep(2)  # Small delay between jobs
+            time.sleep(5)  # Longer delay to ensure Chrome cleanup
             self.run_refinery_runs_job()
             print("✅ All sources completed successfully!")
         except Exception as e:
