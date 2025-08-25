@@ -44,13 +44,13 @@ class GasScraper:
             
             # Add consensus and surprise columns if they don't exist (for existing tables)
             try:
-                conn.execute("ALTER TABLE gas_prices ADD COLUMN consensus DOUBLE")
+                cursor.execute("ALTER TABLE gas_prices ADD COLUMN consensus DOUBLE")
                 print("   ✅ Added consensus column")
             except:
                 pass  # Column already exists
                 
             try:
-                conn.execute("ALTER TABLE gas_prices ADD COLUMN surprise DOUBLE")
+                cursor.execute("ALTER TABLE gas_prices ADD COLUMN surprise DOUBLE")
                 print("   ✅ Added surprise column")
             except:
                 pass  # Column already exists
@@ -174,71 +174,24 @@ class GasScraper:
             else:
                 print("   📱 Running in visible mode")
             
-            # Chrome options optimized for both local Windows and Railway deployment
-            options.add_argument('--no-sandbox')
-            options.add_argument('--disable-dev-shm-usage')
-            options.add_argument('--disable-blink-features=AutomationControlled')
-            options.add_argument('--disable-extensions')
-            options.add_argument('--disable-gpu')
-            options.add_argument('--disable-plugins')
-            options.add_argument('--disable-images')
-            options.add_argument('--disable-background-timer-throttling')
-            options.add_argument('--disable-backgrounding-occluded-windows')
-            options.add_argument('--disable-renderer-backgrounding')
-            options.add_argument('--disable-features=TranslateUI')
-            options.add_argument('--disable-hang-monitor')
-            options.add_argument('--disable-prompt-on-repost')
-            options.add_argument('--disable-client-side-phishing-detection')
-            options.add_argument('--disable-component-extensions-with-background-pages')
-            options.add_argument('--disable-default-apps')
-            options.add_argument('--disable-sync')
-            options.add_argument('--metrics-recording-only')
-            options.add_argument('--no-first-run')
-            options.add_argument('--safebrowsing-disable-auto-update')
-            options.add_argument('--disable-extensions-except')
-            options.add_argument('--disable-component-update')
-            options.add_argument('--disable-domain-reliability')
-            options.add_argument('--disable-ipc-flooding-protection')
-            options.add_argument('--memory-pressure-off')
-            options.add_argument('--max_old_space_size=4096')
-            options.add_argument('--single-process')
-            options.add_argument('--no-zygote')
-            options.add_argument('--disable-setuid-sandbox')
+            # Chrome options optimized for Railway deployment - minimal, proven set
+            options.add_argument("--headless=new")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--disable-software-rasterizer")
+            options.add_argument("--disable-background-networking")
+            options.add_argument("--disable-default-apps")
+            options.add_argument("--disable-extensions")
+            options.add_argument("--disable-sync")
+            options.add_argument("--metrics-recording-only")
+            options.add_argument("--no-first-run")
+            options.add_argument("--safebrowsing-disable-auto-update")
+            options.add_argument("--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints")
+            options.add_argument("--window-size=1920,1080")
+            options.add_argument("--remote-allow-origins=*")
             
-            # Platform-specific options
-            import platform
-            if platform.system() == 'Linux':  # Railway environment
-                options.add_argument('--disable-web-security')
-                options.add_argument('--disable-features=VizDisplayCompositor')
-                options.add_argument('--disable-ipc-flooding-protection')
-                options.add_argument('--memory-pressure-off')
-                options.add_argument('--max_old_space_size=4096')
-                options.add_argument('--single-process')
-                options.add_argument('--no-zygote')
-                options.add_argument('--disable-setuid-sandbox')
-                options.add_argument('--disable-background-timer-throttling')
-                options.add_argument('--disable-backgrounding-occluded-windows')
-                options.add_argument('--disable-renderer-backgrounding')
-                options.add_argument('--disable-features=TranslateUI')
-                options.add_argument('--disable-ipc-flooding-protection')
-                options.add_argument('--disable-hang-monitor')
-                options.add_argument('--disable-prompt-on-repost')
-                options.add_argument('--disable-client-side-phishing-detection')
-                options.add_argument('--disable-component-extensions-with-background-pages')
-                options.add_argument('--disable-default-apps')
-                options.add_argument('--disable-sync')
-                options.add_argument('--metrics-recording-only')
-                options.add_argument('--no-first-run')
-                options.add_argument('--safebrowsing-disable-auto-update')
-                options.add_argument('--disable-extensions-except')
-                options.add_argument('--disable-component-update')
-                options.add_argument('--disable-domain-reliability')
-                options.add_argument('--disable-features=VizDisplayCompositor')
-                options.add_argument('--disable-ipc-flooding-protection')
-                options.add_argument('--memory-pressure-off')
-                options.add_argument('--max_old_space_size=4096')
-                options.add_argument('--single-process')
-            # Windows-specific options are more conservative to avoid crashes
+            # Remove platform-specific options - using minimal, proven set above
             
             # options.add_argument('--disable-javascript')  # Commented out - needed for dynamic content
             
@@ -258,13 +211,15 @@ class GasScraper:
                 print("   🔍 Using Python-based Chrome detection...")
                 
                 # Method 1: Try to use Chrome directly without specifying binary location
-                try:
-                    print("   🔍 Attempting to create Chrome driver without binary specification...")
-                    self.driver = webdriver.Chrome(options=options)
-                    print("   ✅ Chrome driver created successfully without binary specification")
-                    return self.driver
-                except Exception as e:
-                    print(f"   ⚠️ Direct Chrome creation failed: {e}")
+                                 try:
+                     print("   🔍 Attempting to create Chrome driver without binary specification...")
+                     service = Service(log_path="/tmp/chromedriver.log")
+                     self.driver = webdriver.Chrome(service=service, options=options)
+                     self.driver.set_page_load_timeout(60)
+                     print("   ✅ Chrome driver created successfully without binary specification")
+                     return self.driver
+                 except Exception as e:
+                     print(f"   ⚠️ Direct Chrome creation failed: {e}")
                 
                 # Method 2: Search for Chrome in common nix store patterns using Python
                 print("   🔍 Searching for Chrome in nix store patterns...")
@@ -1229,15 +1184,15 @@ class GasScraper:
             
             if not price_text:
                 print("   ❌ Could not find RBOB price with any selector")
-                # Try to get page source for debugging
-                try:
-                    page_source = self.driver.page_source
-                    if "RBOB" in page_source:
-                        print("   🔍 RBOB content found in page source")
-                    else:
-                        print("   🔍 RBOB content not found in page source")
-                except:
-                    pass
+                                          # Try to get page source for debugging
+             try:
+                 page_source = target_driver.page_source
+                 if "RBOB" in page_source:
+                     print("   🔍 RBOB content found in page source")
+                 else:
+                     print("   🔍 RBOB content not found in page source")
+             except:
+                 pass
                 return None
             
             # Try multiple selectors for the timestamp element
@@ -2063,53 +2018,63 @@ class GasScraper:
             conn = psycopg2.connect(database_url)
             
             # Get data for each source for today
-            gasbuddy_data = conn.execute('''
+            cursor = conn.cursor()
+             
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'gasbuddy_fuel_insights'
                 AND DATE(scraped_at) = %s
                 ORDER BY scraped_at DESC
-            ''', (today,)).fetchall()
+            ''', (today,))
+            gasbuddy_data = cursor.fetchall()
             
-            aaa_data = conn.execute('''
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'aaa_gas_prices'
                 AND DATE(scraped_at) = %s
                 ORDER BY scraped_at DESC
-            ''', (today,)).fetchall()
+            ''', (today,))
+            aaa_data = cursor.fetchall()
             
-            rbob_data = conn.execute('''
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'marketwatch_rbob_futures'
                 AND DATE(scraped_at) = %s
                 ORDER BY scraped_at DESC
-            ''', (today,)).fetchall()
+            ''', (today,))
+            rbob_data = cursor.fetchall()
             
-            wti_data = conn.execute('''
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'marketwatch_wti_futures'
                 AND DATE(scraped_at) = %s
                 ORDER BY scraped_at DESC
-            ''', (today,)).fetchall()
+            ''', (today,))
+            wti_data = cursor.fetchall()
             
-            gasoline_stocks_data = conn.execute('''
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, consensus, surprise, scraped_at
                 FROM gas_prices
                 WHERE source = 'tradingeconomics_gasoline_stocks'
                 AND DATE(scraped_at) = %s
                 ORDER BY scraped_at DESC
-            ''', (today,)).fetchall()
+            ''', (today,))
+            gasoline_stocks_data = cursor.fetchall()
             
-            refinery_runs_data = conn.execute('''
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'tradingeconomics_refinery_runs'
                 AND DATE(scraped_at) = %s
                 ORDER BY scraped_at DESC
-            ''', (today,)).fetchall()
+            ''', (today,))
+            refinery_runs_data = cursor.fetchall()
+            
+            cursor.close()
             
             conn.close()
             
@@ -2213,54 +2178,64 @@ class GasScraper:
             database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:QKmnqfjnamSWVXIgeEZZctczGSYOZiKw@switchback.proxy.rlwy.net:51447/railway')
             conn = psycopg2.connect(database_url)
             
-            # Get data for each source for current month
-            gasbuddy_data = conn.execute('''
+                                     # Get data for each source for current month
+            cursor = conn.cursor()
+             
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'gasbuddy_fuel_insights'
                 AND DATE(scraped_at) >= %s
                 ORDER BY scraped_at DESC
-            ''', (current_month,)).fetchall()
+            ''', (current_month,))
+            gasbuddy_data = cursor.fetchall()
             
-            aaa_data = conn.execute('''
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'aaa_gas_prices'
                 AND DATE(scraped_at) >= %s
                 ORDER BY scraped_at DESC
-            ''', (current_month,)).fetchall()
+            ''', (current_month,))
+            aaa_data = cursor.fetchall()
             
-            rbob_data = conn.execute('''
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'marketwatch_rbob_futures'
                 AND DATE(scraped_at) >= %s
                 ORDER BY scraped_at DESC
-            ''', (current_month,)).fetchall()
+            ''', (current_month,))
+            rbob_data = cursor.fetchall()
             
-            wti_data = conn.execute('''
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'marketwatch_wti_futures'
                 AND DATE(scraped_at) >= %s
                 ORDER BY scraped_at DESC
-            ''', (current_month,)).fetchall()
+            ''', (current_month,))
+            wti_data = cursor.fetchall()
             
-            gasoline_stocks_data = conn.execute('''
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, consensus, surprise, scraped_at
                 FROM gas_prices
                 WHERE source = 'tradingeconomics_gasoline_stocks'
                 AND DATE(scraped_at) >= %s
                 ORDER BY scraped_at DESC
-            ''', (current_month,)).fetchall()
+            ''', (current_month,))
+            gasoline_stocks_data = cursor.fetchall()
             
-            refinery_runs_data = conn.execute('''
+            cursor.execute('''
                 SELECT price, timestamp, region, source, fuel_type, scraped_at
                 FROM gas_prices
                 WHERE source = 'tradingeconomics_refinery_runs'
                 AND DATE(scraped_at) >= %s
                 ORDER BY scraped_at DESC
-            ''', (current_month,)).fetchall()
+            ''', (current_month,))
+            refinery_runs_data = cursor.fetchall()
+            
+            cursor.close()
             
             conn.close()
             
@@ -2421,6 +2396,12 @@ def main():
     
     # Create scraper instance
     scraper = GasScraper(headless=True)
+    
+    # Check if running in non-interactive mode (Railway)
+    if os.getenv("NONINTERACTIVE", "0") == "1":
+        print("🚀 Running in non-interactive mode (Railway) - starting scheduled mode...")
+        scraper.run_scheduled()
+        return
     
     try:
         print("\n🚗 Gas Scraper Options:")

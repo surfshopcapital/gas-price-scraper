@@ -5,10 +5,27 @@ nixPkgs = [
   "gcc",
   "chromium",
   "chromedriver",
-  "coreutils",  # Provides ls, echo, test, and other basic commands
-  "findutils",   # Provides find command
-  "glibc",      # Required for Chrome
-  "nss"         # Required for Chrome
+  "coreutils",
+  "findutils",
+  "glibc",
+  "nss",
+  "fontconfig",
+  "freetype",
+  "libgbm",
+  "xorg.libX11",
+  "xorg.libXcomposite",
+  "xorg.libXrandr",
+  "xorg.libXi",
+  "xorg.libXcursor",
+  "xorg.libXdamage",
+  "xorg.libXext",
+  "xorg.libXfixes",
+  "gtk3",
+  "pango",
+  "cairo",
+  "alsaLib",
+  "cups",
+  "dbus"
 ]
 
 [phases.install]
