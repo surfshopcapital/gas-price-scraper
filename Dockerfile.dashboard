@@ -24,7 +24,7 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 
 # Expose port (Railway will override with $PORT)
-EXPOSE 8501
+EXPOSE 8080
 
-# Start Streamlit dashboard
-CMD ["streamlit", "run", "dashboard.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
+# IMPORTANT: bind to the Railway port at runtime
+CMD bash -lc 'streamlit run dashboard.py --server.address 0.0.0.0 --server.port ${PORT:-8080}'
