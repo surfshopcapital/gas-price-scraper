@@ -11,7 +11,7 @@ nixPkgs = [
   "nss",
   "fontconfig",
   "freetype",
-  "libgbm",
+  "mesa",
   "xorg.libX11",
   "xorg.libXcomposite",
   "xorg.libXrandr",
