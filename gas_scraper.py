@@ -62,10 +62,16 @@ class GasScraper:
         try:
             if self._browser:
                 self._browser.close()
+        except Exception as e:
+            print(f"⚠️ Error closing browser: {e}")
         finally:
             self._browser = None
-            if self._playwright:
-                self._playwright.stop()
+            try:
+                if self._playwright:
+                    self._playwright.stop()
+            except Exception as e:
+                print(f"⚠️ Error stopping playwright: {e}")
+            finally:
                 self._playwright = None
 
     @contextmanager
@@ -74,31 +80,36 @@ class GasScraper:
         Creates a fresh browser context + page per job.
         If grant_geo=True, sets geolocation + geolocation permission for GasBuddy.
         """
-        self._boot_playwright()
-        context_kwargs = {
-            "viewport": {"width": 1920, "height": 1080},
-            "user_agent": DEFAULT_UA,
-            "locale": "en-US",
-        }
-
-        if grant_geo:
-            if city is None:
-                city = random.choice(US_CITIES)
-            context_kwargs.update({
-                "geolocation": {"latitude": city["lat"], "longitude": city["lng"]},
-                "permissions": ["geolocation"],  # applies to all origins in this context
-            })
-
-        context = self._browser.new_context(**context_kwargs)
-        page = context.new_page()
-        page.set_default_timeout(30_000)
         try:
-            yield context, page
-        finally:
+            self._boot_playwright()
+            context_kwargs = {
+                "viewport": {"width": 1920, "height": 1080},
+                "user_agent": DEFAULT_UA,
+                "locale": "en-US",
+            }
+
+            if grant_geo:
+                if city is None:
+                    city = random.choice(US_CITIES)
+                context_kwargs.update({
+                    "geolocation": {"latitude": city["lat"], "longitude": city["lng"]},
+                    "permissions": ["geolocation"],  # applies to all origins in this context
+                })
+
+            context = self._browser.new_context(**context_kwargs)
+            page = context.new_page()
+            page.set_default_timeout(30_000)
             try:
-                context.close()
-            except Exception:
-                pass
+                yield context, page
+            finally:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"   ⚠️ Error creating browser context: {e}")
+            # Return dummy context/page that will fail gracefully
+            yield None, None
 
     # ---------------------------
     # DB
@@ -123,12 +134,27 @@ class GasScraper:
             print(f"✅ DB OK @ {now_ts()}")
         except Exception as e:
             print(f"❌ Error initializing database: {e}")
+    
+    def _check_db_connection(self):
+        """Check if database is accessible"""
+        try:
+            conn = psycopg2.connect(self.database_url)
+            conn.close()
+            return True
+        except Exception:
+            return False
 
     def save_to_database(self, rows):
         if not rows:
             return False
         if not isinstance(rows, list):
             rows = [rows]
+        
+        # Check database connection first
+        if not self._check_db_connection():
+            print("❌ Database not accessible, skipping save")
+            return False
+            
         try:
             conn = psycopg2.connect(self.database_url)
             cur = conn.cursor()
@@ -159,7 +185,39 @@ class GasScraper:
             return True
         except Exception as e:
             print(f"❌ Error saving to database: {e}")
-            return False
+            # Try to reconnect and retry once
+            try:
+                print("   🔄 Attempting to reconnect to database...")
+                conn = psycopg2.connect(self.database_url)
+                cur = conn.cursor()
+                saved = 0
+                for r in rows:
+                    cur.execute(
+                        """
+                        INSERT INTO gas_prices
+                          (price, timestamp, region, source, fuel_type, consensus, surprise, scraped_at)
+                        VALUES
+                          (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        """,
+                        (
+                            r.get("price"),
+                            r.get("timestamp"),
+                            r.get("region"),
+                            r.get("source"),
+                            r.get("fuel_type"),
+                            r.get("consensus"),
+                            r.get("surprise"),
+                        ),
+                    )
+                    saved += 1
+                conn.commit()
+                cur.close()
+                conn.close()
+                print(f"✅ Retry successful: Saved {saved} row(s) @ {now_ts()}")
+                return True
+            except Exception as retry_e:
+                print(f"❌ Retry also failed: {retry_e}")
+                return False
 
     # ---------------------------
     # Navigation helper (retry)
@@ -186,6 +244,10 @@ class GasScraper:
         print("🚀 GasBuddy")
         city = random.choice(US_CITIES)
         with self._fresh_context(grant_geo=True, city=city) as (ctx, page):
+            if ctx is None or page is None:
+                print("   ❌ Failed to create browser context")
+                return None
+                
             url = "https://fuelinsights.gasbuddy.com/"
             if not self._goto_with_retry(page, url, attempts=3, wait_state="load"):
                 return None
@@ -234,6 +296,10 @@ class GasScraper:
     def scrape_aaa(self):
         print("🚗 AAA")
         with self._fresh_context() as (ctx, page):
+            if ctx is None or page is None:
+                print("   ❌ Failed to create browser context")
+                return None
+                
             url = "https://gasprices.aaa.com/"
             if not self._goto_with_retry(page, url):
                 return None
@@ -337,6 +403,10 @@ class GasScraper:
     def scrape_rbob(self):
         print("⛽ RBOB")
         with self._fresh_context() as (ctx, page):
+            if ctx is None or page is None:
+                print("   ❌ Failed to create browser context")
+                return None
+                
             url = "https://www.marketwatch.com/investing/future/rb.1"
             if not self._goto_with_retry(page, url):
                 return None
@@ -363,6 +433,10 @@ class GasScraper:
     def scrape_wti(self):
         print("🛢️ WTI")
         with self._fresh_context() as (ctx, page):
+            if ctx is None or page is None:
+                print("   ❌ Failed to create browser context")
+                return None
+                
             url = "https://www.marketwatch.com/investing/future/cl.1"
             if not self._goto_with_retry(page, url):
                 return None
@@ -397,6 +471,10 @@ class GasScraper:
     def scrape_gasoline_stocks(self):
         print("⛽ TE Gasoline Stocks")
         with self._fresh_context() as (ctx, page):
+            if ctx is None or page is None:
+                print("   ❌ Failed to create browser context")
+                return None
+                
             url = "https://tradingeconomics.com/united-states/gasoline-stocks-change"
             if not self._goto_with_retry(page, url, wait_state="load"):
                 return None
@@ -499,6 +577,10 @@ class GasScraper:
     def scrape_refinery_runs(self):
         print("🏭 TE Refinery Runs")
         with self._fresh_context() as (ctx, page):
+            if ctx is None or page is None:
+                print("   ❌ Failed to create browser context")
+                return None
+                
             url = "https://tradingeconomics.com/united-states/refinery-crude-runs"
             if not self._goto_with_retry(page, url, wait_state="load"):
                 return None
@@ -822,42 +904,86 @@ class GasScraper:
         print("• Daily Excel: 22:00 UTC")
         print("• Monthly Excel check: 22:00 UTC (run if day==1)")
         print("=" * 50)
+        
+        # Clear any existing jobs
+        schedule.clear()
 
         # GasBuddy: every 10 minutes (changed from 15)
-        schedule.every(10).minutes.do(self.run_gasbuddy_job)
+        try:
+            schedule.every(10).minutes.do(self.run_gasbuddy_job)
+        except Exception as e:
+            print(f"⚠️ Error scheduling GasBuddy: {e}")
         
         # AAA: daily at 3:01 AM ET
-        schedule.every().day.at("03:01").do(self.run_aaa_job)
+        try:
+            schedule.every().day.at("03:01").do(self.run_aaa_job)
+        except Exception as e:
+            print(f"⚠️ Error scheduling AAA: {e}")
         
         # EIA (TE pages): daily at 15:35 UTC
-        schedule.every().day.at("15:35").do(self.run_gasoline_stocks_job)
-        schedule.every().day.at("15:35").do(self.run_refinery_runs_job)
+        try:
+            schedule.every().day.at("15:35").do(self.run_gasoline_stocks_job)
+            schedule.every().day.at("15:35").do(self.run_refinery_runs_job)
+        except Exception as e:
+            print(f"⚠️ Error scheduling EIA pages: {e}")
         
         # Daily Excel: 22:00 UTC
-        schedule.every().day.at("22:00").do(self.export_daily_excel)
-        schedule.every().day.at("22:00").do(self._monthly_check)
+        try:
+            schedule.every().day.at("22:00").do(self.export_daily_excel)
+            schedule.every().day.at("22:00").do(self._monthly_check)
+        except Exception as e:
+            print(f"⚠️ Error scheduling daily Excel: {e}")
         
         # Daily backup: 23:00 UTC
-        schedule.every().day.at("23:00").do(self._daily_backup_safe)
+        try:
+            schedule.every().day.at("23:00").do(self._daily_backup_safe)
+        except Exception as e:
+            print(f"⚠️ Error scheduling daily backup: {e}")
 
         # RBOB & WTI: every hour from Sunday 6pm EST to Friday 8pm EST
         # Sunday: 6pm-11pm EST (23:00-04:00 UTC next day)
         for hour in range(23, 24):
-            schedule.every().sunday.at(f"{hour:02d}:00").do(self.run_rbob_job)
-            schedule.every().sunday.at(f"{hour:02d}:00").do(self.run_wti_job)
+            try:
+                schedule.every().sunday.at(f"{hour:02d}:00").do(self.run_rbob_job)
+                schedule.every().sunday.at(f"{hour:02d}:00").do(self.run_wti_job)
+            except Exception as e:
+                print(f"⚠️ Error scheduling Sunday at {hour:02d}:00: {e}")
+        # Monday 00:00-04:00 UTC (Sunday 7pm-11pm EST)
+        for hour in range(0, 4):
+            try:
+                schedule.every().monday.at(f"{hour:02d}:00").do(self.run_rbob_job)
+                schedule.every().monday.at(f"{hour:02d}:00").do(self.run_wti_job)
+            except Exception as e:
+                print(f"⚠️ Error scheduling Monday at {hour:02d}:00: {e}")
         
         # Monday-Thursday: every hour from 6am-11pm EST (11:00-04:00 UTC next day)
         for hour in range(11, 24):
             for day in ("monday", "tuesday", "wednesday", "thursday"):
-                getattr(schedule.every(), day).at(f"{hour:02d}:00").do(self.run_rbob_job)
-                getattr(schedule.every(), day).at(f"{hour:02d}:00").do(self.run_wti_job)
+                try:
+                    getattr(schedule.every(), day).at(f"{hour:02d}:00").do(self.run_rbob_job)
+                    getattr(schedule.every(), day).at(f"{hour:02d}:00").do(self.run_wti_job)
+                except Exception as e:
+                    print(f"⚠️ Error scheduling {day} at {hour:02d}:00: {e}")
         
-        # Friday: every hour from 6am-8pm EST (11:00-01:00 UTC next day)
-        for hour in range(11, 25):  # 25 = 01:00 UTC next day
-            schedule.every().friday.at(f"{hour:02d}:00").do(self.run_rbob_job)
-            schedule.every().friday.at(f"{hour:02d}:00").do(self.run_wti_job)
+        # Friday: every hour from 6am-8pm EST (11:00-00:00 UTC next day)
+        for hour in range(11, 24):
+            try:
+                schedule.every().friday.at(f"{hour:02d}:00").do(self.run_rbob_job)
+                schedule.every().friday.at(f"{hour:02d}:00").do(self.run_wti_job)
+            except Exception as e:
+                print(f"⚠️ Error scheduling Friday at {hour:02d}:00: {e}")
+        # Add 00:00 UTC (8pm EST Friday)
+        try:
+            schedule.every().friday.at("00:00").do(self.run_rbob_job)
+            schedule.every().friday.at("00:00").do(self.run_wti_job)
+        except Exception as e:
+            print(f"⚠️ Error scheduling Friday at 00:00: {e}")
 
         print("✅ Scheduler started")
+        
+        # Verify all jobs were scheduled correctly
+        total_jobs = len(schedule.get_jobs())
+        print(f"📊 Total scheduled jobs: {total_jobs}")
 
     def run_scheduled(self):
         # Set up the scheduler first

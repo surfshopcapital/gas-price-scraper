@@ -7,8 +7,8 @@ This script starts the gas price scraper in scheduled mode for Railway deploymen
 import os
 import sys
 import time
-import select
 import socket
+import signal
 import schedule
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from gas_scraper import GasScraper
@@ -41,9 +41,18 @@ def start_health_server(port=8000):
         print(f"❌ Health server error: {e}")
         return None
 
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully"""
+    print(f"\n🛑 Received signal {signum}, shutting down gracefully...")
+    sys.exit(0)
+
 def main():
     print("🚀 Starting Gas Price Scraper in scheduled mode...")
     print("=" * 50)
+    
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
     
     try:
         # Test PostgreSQL connection first
@@ -58,7 +67,7 @@ def main():
         scraper = GasScraper()
         
         # Start health check server
-        port = int(os.getenv('PORT', 8000))
+        port = int(os.getenv('PORT', 8080))  # Match Railway's default port
         print(f"🌐 Starting HTTP server on port {port}...")
         
         server = start_health_server(port)
@@ -73,7 +82,15 @@ def main():
         
         # Set up all scheduled jobs (this was missing!)
         # We need to call the scheduler setup without running the blocking loop
-        scraper._setup_scheduler()
+        try:
+            scraper._setup_scheduler()
+            print("✅ Scheduler setup completed successfully")
+        except Exception as e:
+            print(f"❌ Critical error setting up scheduler: {e}")
+            print("🔄 Continuing with basic functionality only...")
+            # Set up minimal schedule as fallback
+            schedule.every(10).minutes.do(scraper.run_gasbuddy_job)
+            print("✅ Basic fallback scheduler set up")
         
         # Run initial job once
         print("🚀 Initial run of all sources once...")
@@ -92,22 +109,30 @@ def main():
                     pass  # No request, continue to scheduler
                 
                 # Run pending scheduled tasks
-                import schedule
-                jobs_run = schedule.run_pending()
-                if jobs_run:
-                    print(f"✅ Executed {len(jobs_run)} scheduled job(s) @ {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                try:
+                    jobs_run = schedule.run_pending()
+                    if jobs_run:
+                        print(f"✅ Executed {len(jobs_run)} scheduled job(s) @ {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                except Exception as e:
+                    print(f"⚠️ Error running scheduled tasks: {e}")
                 
                 # Show status every 5 minutes to confirm scheduler is alive
                 current_time = time.time()
                 if current_time - last_status_time > 300:  # 5 minutes
-                    print(f"🔄 Scheduler heartbeat @ {time.strftime('%Y-%m-%d %H:%M:%S')} - {len(schedule.get_jobs())} jobs registered")
-                    
-                    # Show next few scheduled jobs
-                    next_jobs = schedule.get_jobs()
-                    if next_jobs:
-                        print(f"   📅 Next jobs:")
-                        for i, job in enumerate(next_jobs[:3]):  # Show next 3 jobs
-                            print(f"      {i+1}. {job.job_func.__name__} @ {job.next_run}")
+                    try:
+                        print(f"🔄 Scheduler heartbeat @ {time.strftime('%Y-%m-%d %H:%M:%S')} - {len(schedule.get_jobs())} jobs registered")
+                        
+                        # Show next few scheduled jobs
+                        next_jobs = schedule.get_jobs()
+                        if next_jobs:
+                            print(f"   📅 Next jobs:")
+                            for i, job in enumerate(next_jobs[:3]):  # Show next 3 jobs
+                                try:
+                                    print(f"      {i+1}. {job.job_func.__name__} @ {job.next_run}")
+                                except Exception as e:
+                                    print(f"      {i+1}. Unknown job (error: {e})")
+                    except Exception as e:
+                        print(f"⚠️ Error in scheduler heartbeat: {e}")
                     
                     last_status_time = current_time
                 
@@ -127,6 +152,11 @@ def main():
     finally:
         if 'server' in locals():
             server.server_close()
+        if 'scraper' in locals():
+            try:
+                scraper._shutdown_playwright()
+            except Exception as e:
+                print(f"⚠️ Error during shutdown: {e}")
         print("🔄 Shutting down...")
 
 if __name__ == "__main__":
