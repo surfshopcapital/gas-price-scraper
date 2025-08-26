@@ -37,6 +37,8 @@ st.markdown("""
 .update-metric { text-align: center; }
 .update-metric .metric-label { font-size: 1.1rem; font-weight: bold; color: #1f77b4; margin-bottom: 0.5rem; }
 .update-metric .metric-value { font-size: 0.85rem; color: #6c757d; line-height: 1.3; }
+.data-table { background: #ffffff; border-radius: 0.8rem; padding: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border-left: 4px solid #28a745; }
+.data-table h4 { color: #2c3e50; margin-bottom: 1rem; text-align: center; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -205,6 +207,76 @@ def get_next_update_info():
         'rbob_wti': next_rbob_wti,
         'eia': next_eia
     }
+
+def calculate_averages(data, source_name):
+    """Calculate daily, month-to-date, and week-to-date averages for a data source"""
+    try:
+        if data.empty:
+            return {
+                'daily_avg': 'No data',
+                'mtd_avg': 'No data', 
+                'wtd_avg': 'No data'
+            }
+        
+        # Convert scraped_at to datetime
+        data['scraped_at'] = pd.to_datetime(data['scraped_at'], errors='coerce', utc=False)
+        data = data.dropna(subset=['scraped_at'])
+        
+        if data.empty:
+            return {
+                'daily_avg': 'No data',
+                'mtd_avg': 'No data',
+                'wtd_avg': 'No data'
+            }
+        
+        # Get current date and time
+        now = datetime.now()
+        today = now.date()
+        
+        # Daily average (today's data only)
+        today_data = data[data['scraped_at'].dt.date == today]
+        daily_avg = today_data['price'].mean() if not today_data.empty else None
+        
+        # Month-to-date average (from 1st of current month)
+        month_start = today.replace(day=1)
+        mtd_data = data[data['scraped_at'].dt.date >= month_start]
+        mtd_avg = mtd_data['price'].mean() if not mtd_data.empty else None
+        
+        # Week-to-date average (Monday noon EST to current)
+        # Find last Monday at noon EST (UTC-5, so 17:00 UTC)
+        days_since_monday = now.weekday()
+        monday_noon_est = now - timedelta(days=days_since_monday)
+        monday_noon_est = monday_noon_est.replace(hour=17, minute=0, second=0, microsecond=0)  # 17:00 UTC = 12:00 EST
+        
+        # If we're before Monday noon, go back to previous Monday
+        if now < monday_noon_est:
+            monday_noon_est -= timedelta(days=7)
+        
+        wtd_data = data[data['scraped_at'] >= monday_noon_est]
+        wtd_avg = wtd_data['price'].mean() if not wtd_data.empty else None
+        
+        # Format results
+        def format_price(price):
+            if price is None or pd.isna(price):
+                return 'No data'
+            if source_name == 'Crack Spread':
+                return f"${price:.2f}"
+            else:
+                return f"${price:.3f}"
+        
+        return {
+            'daily_avg': format_price(daily_avg),
+            'mtd_avg': format_price(mtd_avg),
+            'wtd_avg': format_price(wtd_avg)
+        }
+        
+    except Exception as e:
+        st.error(f"Error calculating averages for {source_name}: {e}")
+        return {
+            'daily_avg': 'Error',
+            'mtd_avg': 'Error',
+            'wtd_avg': 'Error'
+        }
 
 def main():
     st.markdown('<h1 class="main-header">Gas Price Dashboard</h1>', unsafe_allow_html=True)
@@ -445,7 +517,7 @@ def main():
     st.markdown('</div>', unsafe_allow_html=True)
 
     # ===========================
-    # 📈 NEW CHARTS (Bottom Area)
+    # 📈 NEW CHARTS (Bottom Area) - 3/5 width with tables
     # ===========================
     st.markdown("---")
     st.header("📊 Historical Trends & Analysis")
@@ -456,167 +528,159 @@ def main():
         out = pd.to_datetime(series, errors='coerce', utc=False)
         return out
 
-    # ---------- 1) Month-to-date line graph: GasBuddy avg per day + AAA daily dots ----------
-    st.subheader("1. Month-to-Date Gas Prices: GasBuddy vs AAA")
-    try:
-        gb = historical_data[historical_data['source'] == 'gasbuddy_fuel_insights'].copy()
-        aaa = historical_data[historical_data['source'] == 'aaa_gas_prices'].copy()
-
-        if not gb.empty and not aaa.empty:
-            gb['scraped_at'] = _to_datetime(gb['scraped_at'])
-            aaa['scraped_at'] = _to_datetime(aaa['scraped_at'])
-
-            # Current month filter (based on local system date)
-            today_dt = datetime.now()
-            month_start = today_dt.replace(day=1).date()
-            gb['date'] = gb['scraped_at'].dt.date
-            aaa['date'] = aaa['scraped_at'].dt.date
-
-            gb_mtd = gb[(gb['date'] >= month_start) & (gb['date'] <= today_dt.date())].copy()
-            aaa_mtd = aaa[(aaa['date'] >= month_start) & (aaa['date'] <= today_dt.date())].copy()
-
-            if not gb_mtd.empty:
-                # Average GasBuddy by day for smoother MTD trend
-                gb_daily = (gb_mtd
-                            .groupby('date', as_index=False)['price']
-                            .mean()
-                            .rename(columns={'price': 'gb_avg_price'}))
-
-                # AAA: one point per day (last observation of the day if multiple)
-                aaa_daily = (aaa_mtd
-                             .sort_values('scraped_at')
-                             .groupby('date', as_index=False)
-                             .tail(1)[['date', 'price']])
-
-                fig_mtd = go.Figure()
+    # ---------- 1) GasBuddy Month-to-Date Chart (3/5 width) + Table (2/5 width) ----------
+    st.subheader("1. GasBuddy Month-to-Date Prices")
+    
+    col1, col2 = st.columns([3, 2])
+    
+    with col1:
+        try:
+            gb = historical_data[historical_data['source'] == 'gasbuddy_fuel_insights'].copy()
+            
+            if not gb.empty:
+                gb['scraped_at'] = _to_datetime(gb['scraped_at'])
                 
-                # GasBuddy line with smaller markers
-                fig_mtd.add_trace(go.Scatter(
-                    x=gb_daily['date'], y=gb_daily['gb_avg_price'],
-                    mode='lines+markers',
-                    name='GasBuddy (Daily Average)',
-                    line=dict(color='#1f77b4', width=2),
-                    marker=dict(size=6, color='#1f77b4'),
-                    hovertemplate='Date=%{x}<br>Avg Price=$%{y:.3f}<extra></extra>'
-                ))
+                # Current month filter
+                today_dt = datetime.now()
+                month_start = today_dt.replace(day=1).date()
+                gb['date'] = gb['scraped_at'].dt.date
                 
-                # AAA dots (larger, different color)
-                if not aaa_daily.empty:
-                    fig_mtd.add_trace(go.Scatter(
-                        x=aaa_daily['date'], y=aaa_daily['price'],
-                        mode='markers',
-                        marker=dict(size=12, symbol='circle-open', color='#ff7f0e', line=dict(width=2)),
-                        name='AAA (Daily)',
+                gb_mtd = gb[(gb['date'] >= month_start) & (gb['date'] <= today_dt.date())].copy()
+                
+                if not gb_mtd.empty:
+                    fig_gb = go.Figure()
+                    
+                    # GasBuddy line connecting each point
+                    fig_gb.add_trace(go.Scatter(
+                        x=gb_mtd['scraped_at'], y=gb_mtd['price'],
+                        mode='lines+markers',
+                        name='GasBuddy Prices',
+                        line=dict(color='#1f77b4', width=2),
+                        marker=dict(size=6, color='#1f77b4'),
+                        hovertemplate='Time=%{x}<br>Price=$%{y:.3f}<extra></extra>'
+                    ))
+                    
+                    fig_gb.update_layout(
+                        title="GasBuddy Month-to-Date: Live Ticking Prices",
+                        xaxis_title="Date & Time",
+                        yaxis_title="Price ($/gal)",
+                        height=450,
+                        margin=dict(l=40, r=20, t=60, b=40),
+                        hovermode='x unified',
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+                    )
+                    
+                    st.plotly_chart(fig_gb, use_container_width=True)
+                    
+                    st.info("🔄 **GasBuddy**: Live ticking average updated every 10 minutes. Shows all data points collected during the current month.")
+                else:
+                    st.warning("No GasBuddy data available for current month")
+            else:
+                st.warning("No GasBuddy data available")
+                
+        except Exception as e:
+            st.error(f"Error rendering GasBuddy chart: {e}")
+            st.exception(e)
+    
+    with col2:
+        st.markdown('<div class="data-table">', unsafe_allow_html=True)
+        st.markdown('<h4>GasBuddy Averages</h4>', unsafe_allow_html=True)
+        
+        # Calculate averages for GasBuddy
+        gb_data = historical_data[historical_data['source'] == 'gasbuddy_fuel_insights'].copy()
+        gb_averages = calculate_averages(gb_data, 'GasBuddy')
+        
+        # Create sleek table
+        avg_data = {
+            'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+            'Average Price': [gb_averages['daily_avg'], gb_averages['mtd_avg'], gb_averages['wtd_avg']]
+        }
+        
+        df_gb = pd.DataFrame(avg_data)
+        st.dataframe(df_gb, use_container_width=True, hide_index=True)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ---------- 2) AAA Daily Chart (3/5 width) + Table (2/5 width) ----------
+    st.subheader("2. AAA Daily Gas Prices")
+    
+    col1, col2 = st.columns([3, 2])
+    
+    with col1:
+        try:
+            aaa = historical_data[historical_data['source'] == 'aaa_gas_prices'].copy()
+            
+            if not aaa.empty:
+                aaa['scraped_at'] = _to_datetime(aaa['scraped_at'])
+                
+                # Current month filter
+                today_dt = datetime.now()
+                month_start = today_dt.replace(day=1).date()
+                aaa['date'] = aaa['scraped_at'].dt.date
+                
+                aaa_mtd = aaa[(aaa['date'] >= month_start) & (aaa['date'] <= today_dt.date())].copy()
+                
+                if not aaa_mtd.empty:
+                    fig_aaa = go.Figure()
+                    
+                    # AAA line connecting each point
+                    fig_aaa.add_trace(go.Scatter(
+                        x=aaa_mtd['scraped_at'], y=aaa_mtd['price'],
+                        mode='lines+markers',
+                        name='AAA Daily Prices',
+                        line=dict(color='#ff7f0e', width=2),
+                        marker=dict(size=8, color='#ff7f0e'),
                         hovertemplate='Date=%{x}<br>AAA Price=$%{y:.3f}<extra></extra>'
                     ))
-
-                fig_mtd.update_layout(
-                    title="Month-to-Date: GasBuddy Daily Average vs. AAA Daily Prices",
-                    xaxis_title="Date",
-                    yaxis_title="Price ($/gal)",
-                    height=450,
-                    margin=dict(l=40, r=20, t=60, b=40),
-                    hovermode='x unified',
-                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-                )
-                
-                st.plotly_chart(fig_mtd, use_container_width=True)
-                
-                # Add explanatory text
-                st.info("🔄 **GasBuddy**: Live ticking average (updated every 10 min) shown as daily averages. **AAA**: Daily national average (updated once daily at 3:30 AM EST) shown as individual data points.")
+                    
+                    fig_aaa.update_layout(
+                        title="AAA Month-to-Date: Daily National Average",
+                        xaxis_title="Date",
+                        yaxis_title="Price ($/gal)",
+                        height=450,
+                        margin=dict(l=40, r=20, t=60, b=40),
+                        hovermode='x unified',
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+                    )
+                    
+                    st.plotly_chart(fig_aaa, use_container_width=True)
+                    
+                    st.info("⛽ **AAA**: Daily national average updated once daily at 3:30 AM EST. Shows daily data points for the current month.")
+                else:
+                    st.warning("No AAA data available for current month")
             else:
-                st.warning("No GasBuddy data available for current month")
-        else:
-            st.warning("Missing data sources for MTD comparison")
-            
-    except Exception as e:
-        st.error(f"Error rendering MTD GasBuddy vs AAA chart: {e}")
-        st.exception(e)
-
-    # ---------- 2) Last month RBOB & WTI futures with dual y-axes ----------
-    st.subheader("2. RBOB & WTI Futures (Last 30 Days)")
-    try:
-        rbob = historical_data[historical_data['source'] == 'marketwatch_rbob_futures'].copy()
-        wti = historical_data[historical_data['source'] == 'marketwatch_wti_futures'].copy()
-
-        if not rbob.empty and not wti.empty:
-            rbob['scraped_at'] = _to_datetime(rbob['scraped_at'])
-            wti['scraped_at'] = _to_datetime(wti['scraped_at'])
-
-            # Resample to daily averages for cleaner view
-            rbob_daily = (rbob.set_index('scraped_at')
-                               .resample('D')['price']
-                               .mean()
-                               .reset_index()
-                               .rename(columns={'price': 'RBOB'}))
-            wti_daily = (wti.set_index('scraped_at')
-                              .resample('D')['price']
-                              .mean()
-                              .reset_index()
-                              .rename(columns={'price': 'WTI'}))
-
-            # Merge on date for shared x-axis
-            rbob_daily['date'] = rbob_daily['scraped_at'].dt.date
-            wti_daily['date'] = wti_daily['scraped_at'].dt.date
-            futures_df = pd.merge(rbob_daily[['date','RBOB']], wti_daily[['date','WTI']], on='date', how='outer').sort_values('date')
-
-            if not futures_df.empty:
-                fig_dual = make_subplots(specs=[[{"secondary_y": True}]])
+                st.warning("No AAA data available")
                 
-                # RBOB on left y-axis (primary)
-                fig_dual.add_trace(
-                    go.Scatter(
-                        x=futures_df['date'], y=futures_df['RBOB'], 
-                        name="RBOB ($/gal)", 
-                        mode='lines+markers',
-                        line=dict(color='#2ca02c', width=2),
-                        marker=dict(size=6, color='#2ca02c')
-                    ),
-                    secondary_y=False
-                )
-                
-                # WTI on right y-axis (secondary)
-                fig_dual.add_trace(
-                    go.Scatter(
-                        x=futures_df['date'], y=futures_df['WTI'], 
-                        name="WTI ($/bbl)", 
-                        mode='lines+markers',
-                        line=dict(color='#d62728', width=2),
-                        marker=dict(size=6, color='#d62728')
-                    ),
-                    secondary_y=True
-                )
-                
-                fig_dual.update_layout(
-                    title="Futures Prices: RBOB vs. WTI (Last 30 Days)",
-                    height=450,
-                    margin=dict(l=40, r=40, t=60, b=40),
-                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-                    hovermode='x unified'
-                )
-                
-                fig_dual.update_xaxes(title_text="Date")
-                fig_dual.update_yaxes(title_text="RBOB ($/gal)", secondary_y=False, color='#2ca02c')
-                fig_dual.update_yaxes(title_text="WTI ($/bbl)", secondary_y=True, color='#d62728')
-                
-                st.plotly_chart(fig_dual, use_container_width=True)
-                
-                # Add explanatory text
-                st.info("⛽ **RBOB**: Gasoline futures in $/gallon. **WTI**: Crude oil futures in $/barrel. Both updated hourly during market hours (Sun 6pm EST - Fri 8pm EST).")
-            else:
-                st.warning("No futures data available for charting")
-        else:
-            st.warning("Missing futures data sources")
-            
-    except Exception as e:
-        st.error(f"Error rendering RBOB/WTI dual-axis chart: {e}")
-        st.exception(e)
+        except Exception as e:
+            st.error(f"Error rendering AAA chart: {e}")
+            st.exception(e)
+    
+    with col2:
+        st.markdown('<div class="data-table">', unsafe_allow_html=True)
+        st.markdown('<h4>AAA Averages</h4>', unsafe_allow_html=True)
+        
+        # Calculate averages for AAA
+        aaa_data = historical_data[historical_data['source'] == 'aaa_gas_prices'].copy()
+        aaa_averages = calculate_averages(aaa_data, 'AAA')
+        
+        # Create sleek table
+        avg_data = {
+            'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+            'Average Price': [aaa_averages['daily_avg'], aaa_averages['mtd_avg'], aaa_averages['wtd_avg']]
+        }
+        
+        df_aaa = pd.DataFrame(avg_data)
+        st.dataframe(df_aaa, use_container_width=True, hide_index=True)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    # ---------- 3) Crack Spread chart (last month) ----------
+    # ---------- 3) Crack Spread Chart (3/5 width) + Table (2/5 width) ----------
     st.subheader("3. Crack Spread Analysis (Last 30 Days)")
-    try:
-        # Use futures_df from previous step if available, otherwise compute again
-        if 'futures_df' not in locals():
+    
+    col1, col2 = st.columns([3, 2])
+    
+    with col1:
+        try:
             rbob = historical_data[historical_data['source'] == 'marketwatch_rbob_futures'].copy()
             wti = historical_data[historical_data['source'] == 'marketwatch_wti_futures'].copy()
             
@@ -624,6 +688,7 @@ def main():
                 rbob['scraped_at'] = _to_datetime(rbob['scraped_at'])
                 wti['scraped_at'] = _to_datetime(wti['scraped_at'])
                 
+                # Resample to daily averages for cleaner view
                 rbob_daily = (rbob.set_index('scraped_at')
                                    .resample('D')['price']
                                    .mean()
@@ -635,66 +700,88 @@ def main():
                                   .reset_index()
                                   .rename(columns={'price':'WTI'}))
                 
+                # Merge on date for shared x-axis
                 rbob_daily['date'] = rbob_daily['scraped_at'].dt.date
                 wti_daily['date'] = wti_daily['scraped_at'].dt.date
                 futures_df = pd.merge(rbob_daily[['date','RBOB']], wti_daily[['date','WTI']], on='date', how='outer').sort_values('date')
-
-        if 'futures_df' in locals() and not futures_df.empty:
-            crack_df = futures_df.copy()
-            crack_df['WTI_gal'] = crack_df['WTI'] / 42.0  # Convert barrel to gallon
-            crack_df['Crack_Spread'] = crack_df['RBOB'] - crack_df['WTI_gal']
-            
-            # Remove any infinite or NaN values
-            crack_df = crack_df.dropna()
-
-            if not crack_df.empty:
-                fig_crack = go.Figure()
                 
-                # Main crack spread line
-                fig_crack.add_trace(go.Scatter(
-                    x=crack_df['date'], y=crack_df['Crack_Spread'],
-                    mode='lines+markers',
-                    name='Crack Spread ($/gal)',
-                    line=dict(color='#9467bd', width=3),
-                    marker=dict(size=8, color='#9467bd'),
-                    hovertemplate='Date=%{x}<br>Crack Spread=$%{y:.3f}/gal<extra></extra>'
-                ))
-                
-                # Add horizontal line at zero for reference
-                fig_crack.add_hline(y=0, line_dash="dash", line_color="gray", 
-                                  annotation_text="Break-even", annotation_position="bottom right")
-                
-                fig_crack.update_layout(
-                    title="Crack Spread: RBOB - (WTI/42) — Last 30 Days",
-                    xaxis_title="Date",
-                    yaxis_title="Crack Spread ($/gallon)",
-                    height=450,
-                    margin=dict(l=40, r=20, t=60, b=40),
-                    hovermode='x unified',
-                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-                )
-                
-                st.plotly_chart(fig_crack, use_container_width=True)
-                
-                # Add explanatory text and statistics
-                col1, col2 = st.columns(2)
-                with col1:
-                    avg_crack = crack_df['Crack_Spread'].mean()
-                    st.metric("Average Crack Spread", f"${avg_crack:.3f}/gal")
-                
-                with col2:
-                    current_crack = crack_df['Crack_Spread'].iloc[-1] if len(crack_df) > 0 else 0
-                    st.metric("Current Crack Spread", f"${current_crack:.3f}/gal")
-                
-                st.info("🏭 **Crack Spread** = RBOB gasoline price - (WTI crude price ÷ 42). This represents the theoretical refining margin. Positive values indicate profitable refining conditions.")
+                if not futures_df.empty:
+                    crack_df = futures_df.copy()
+                    # NEW FORMULA: (RBOB * 42) - WTI (in dollars)
+                    crack_df['Crack_Spread'] = (crack_df['RBOB'] * 42) - crack_df['WTI']
+                    
+                    # Remove any infinite or NaN values
+                    crack_df = crack_df.dropna()
+                    
+                    if not crack_df.empty:
+                        fig_crack = go.Figure()
+                        
+                        # Main crack spread line
+                        fig_crack.add_trace(go.Scatter(
+                            x=crack_df['date'], y=crack_df['Crack_Spread'],
+                            mode='lines+markers',
+                            name='Crack Spread ($)',
+                            line=dict(color='#9467bd', width=3),
+                            marker=dict(size=8, color='#9467bd'),
+                            hovertemplate='Date=%{x}<br>Crack Spread=$%{y:.2f}<extra></extra>'
+                        ))
+                        
+                        # Add horizontal line at zero for reference
+                        fig_crack.add_hline(y=0, line_dash="dash", line_color="gray", 
+                                          annotation_text="Break-even", annotation_position="bottom right")
+                        
+                        fig_crack.update_layout(
+                            title="Crack Spread: (RBOB × 42) - WTI — Last 30 Days",
+                            xaxis_title="Date",
+                            yaxis_title="Crack Spread ($)",
+                            height=450,
+                            margin=dict(l=40, r=20, t=60, b=40),
+                            hovermode='x unified',
+                            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+                        )
+                        
+                        st.plotly_chart(fig_crack, use_container_width=True)
+                        
+                        st.info("🏭 **Crack Spread** = (RBOB gasoline price × 42) - WTI crude price. This represents the theoretical refining margin in dollars. Positive values indicate profitable refining conditions.")
+                    else:
+                        st.warning("No valid crack spread data available")
+                else:
+                    st.warning("No futures data available for crack spread calculation")
             else:
-                st.warning("No valid crack spread data available")
-        else:
-            st.warning("Missing futures data for crack spread calculation")
-            
-    except Exception as e:
-        st.error(f"Error rendering Crack Spread chart: {e}")
-        st.exception(e)
+                st.warning("Missing futures data sources for crack spread")
+                
+        except Exception as e:
+            st.error(f"Error rendering Crack Spread chart: {e}")
+            st.exception(e)
+    
+    with col2:
+        st.markdown('<div class="data-table">', unsafe_allow_html=True)
+        st.markdown('<h4>Crack Spread Averages</h4>', unsafe_allow_html=True)
+        
+        # Calculate averages for Crack Spread
+        try:
+            if 'crack_df' in locals() and not crack_df.empty:
+                # Create a temporary dataframe with the crack spread data for averaging
+                crack_data = crack_df[['date', 'Crack_Spread']].copy()
+                crack_data['scraped_at'] = pd.to_datetime(crack_data['date'])
+                
+                # Calculate averages using the same function
+                crack_averages = calculate_averages(crack_data, 'Crack Spread')
+                
+                # Create sleek table
+                avg_data = {
+                    'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                    'Average Spread': [crack_averages['daily_avg'], crack_averages['mtd_avg'], crack_averages['wtd_avg']]
+                }
+                
+                df_crack = pd.DataFrame(avg_data)
+                st.dataframe(df_crack, use_container_width=True, hide_index=True)
+            else:
+                st.warning("No crack spread data available for averages")
+        except Exception as e:
+            st.error(f"Error calculating crack spread averages: {e}")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
     # Footer
     st.markdown("---")
