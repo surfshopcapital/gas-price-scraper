@@ -43,8 +43,8 @@ st.markdown("""
 .update-metric .metric-value { font-size: 0.85rem; color: #6c757d; line-height: 1.3; }
 .data-table { background: #ffffff; border-radius: 0.8rem; padding: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); height: 100%; display: flex; flex-direction: column; justify-content: flex-start; }
 .data-table h4 { color: #2c3e50; margin: 0 0 1rem 0; text-align: center; padding: 0; }
-.data-table .stDataFrame { flex: 1; }
-.chart-section { margin-bottom: 1rem; }
+ .data-table .stDataFrame { flex: 1; min-height: 200px; }
+.chart-section { margin-bottom: 2rem; }
 .stDataFrame > div { height: 100% !important; }
 .stDataFrame > div > div { height: 100% !important; }
 .stDownloadButton { margin-top: 1rem; }
@@ -230,7 +230,8 @@ def create_chart_csv(chart_data, source_name, chart_type):
         else:
             csv_data = chart_data[['scraped_at', 'price']].copy()
             # Convert UTC timestamps to EST for CSV export
-            csv_data['scraped_at'] = pd.to_datetime(csv_data['scraped_at'], utc=True) - timedelta(hours=5)
+            csv_data['scraped_at'] = pd.to_datetime(csv_data['scraped_at'], utc=True)
+            csv_data['scraped_at'] = csv_data['scraped_at'].dt.tz_convert('America/New_York')
             csv_data.columns = ['Timestamp (EST)', 'Price_$']
         
         return csv_data.to_csv(index=False)
@@ -405,18 +406,26 @@ def _add_lags(base: pd.DataFrame, max_lag: int = 14) -> pd.DataFrame:
 
 def fit_forecast_with_lags(historical_data: pd.DataFrame, sim_n: int = 2000, max_lag: int = 14):
     try:
+        st.info("🔍 Starting modeling process...")
+        
         base = _daily_panel(historical_data)
         if base.empty:
             raise ValueError("No usable daily panel; check inputs.")
         
+        st.info(f"📊 Daily panel created with {len(base)} rows")
+        
         base = _make_pulses(base)
         base = _add_lags(base, max_lag=max_lag)
+        
+        st.info(f"📈 Added lags and pulses. Shape: {base.shape}")
 
         # More aggressive NaN handling
         model_df = base.dropna(subset=["gas_price","gas_lag1"]).copy()
         
         if model_df.empty:
             raise ValueError("No data available after removing NaN values in gas_price or gas_lag1")
+
+        st.info(f"✅ After NaN removal: {len(model_df)} rows")
 
         lag_cols = ([f"rbob_l{l}" for l in range(max_lag+1)] +
                     [f"wti_l{l}"  for l in range(max_lag+1)] +
@@ -426,10 +435,15 @@ def fit_forecast_with_lags(historical_data: pd.DataFrame, sim_n: int = 2000, max
         # Check if all required columns exist
         missing_cols = [col for col in feat_cols if col not in model_df.columns]
         if missing_cols:
-            raise ValueError(f"Missing required columns: {missing_cols}")
+            st.warning(f"⚠️ Missing columns: {missing_cols}")
+            # Only use columns that exist
+            feat_cols = [col for col in feat_cols if col in model_df.columns]
+            st.info(f"📋 Using available features: {feat_cols}")
 
         X = model_df[feat_cols].copy()
         y = model_df["gas_price"].copy()
+        
+        st.info(f"🔧 Feature matrix shape: {X.shape}, Target shape: {y.shape}")
         
         # More robust NaN handling
         X = X.fillna(method="ffill").fillna(method="bfill").fillna(X.mean())
@@ -438,8 +452,9 @@ def fit_forecast_with_lags(historical_data: pd.DataFrame, sim_n: int = 2000, max
         if X.isna().any().any():
             # Drop rows with any remaining NaN values
             valid_mask = ~X.isna().any(axis=1)
-            X = X[valid_mask]
-            y = y[valid_mask]
+            X = X.loc[valid_mask]
+            y = y.loc[valid_mask]
+            model_df = model_df.loc[valid_mask]  # Keep aligned
             
             if X.empty:
                 raise ValueError("No data available after removing all NaN values")
@@ -448,10 +463,14 @@ def fit_forecast_with_lags(historical_data: pd.DataFrame, sim_n: int = 2000, max
         if len(X) < 10:
             raise ValueError(f"Insufficient data for modeling. Need at least 10 observations, got {len(X)}")
 
+        st.info(f"✅ Final data shape: X={X.shape}, y={y.shape}")
+
         # time-ordered 80/20 split
         cut = int(len(model_df)*0.8) if len(model_df) >= 20 else max(1, int(len(model_df)*0.8))
         X_train, X_test = X.iloc[:cut], X.iloc[cut:]
         y_train, y_test = y.iloc[:cut], y.iloc[cut:]
+        
+        st.info(f"📊 Train/Test split: {len(X_train)}/{len(X_test)}")
 
         ridge = RidgeCV(alphas=np.logspace(-4,3,21))
         ridge.fit(X_train, y_train)
@@ -459,7 +478,7 @@ def fit_forecast_with_lags(historical_data: pd.DataFrame, sim_n: int = 2000, max
         y_pred = ridge.predict(X_test) if len(X_test)>0 else np.array([])
         metrics = {
             "MAE": float(mean_absolute_error(y_test, y_pred)) if len(y_pred)>0 else np.nan,
-            "RMSE": float(mean_squared_error(y_test, y_pred, squared=False)) if len(y_pred)>0 else np.nan,
+            "RMSE": float(np.sqrt(mean_squared_error(y_test, y_pred))) if len(y_pred)>0 else np.nan,
             "R2": float(r2_score(y_test, y_pred)) if len(y_pred)>0 else np.nan,
         }
 
@@ -474,13 +493,24 @@ def fit_forecast_with_lags(historical_data: pd.DataFrame, sim_n: int = 2000, max
         mtd_avg = float(mtd["gas_price"].mean()) if not mtd.empty else np.nan
         last_actual = mtd["date"].max() if not mtd.empty else (month_start - pd.Timedelta(days=1))
 
+        st.info(f"📅 Month context: {month_start.date()} to {month_end.date()}, MTD avg: {mtd_avg:.3f}")
+
         # Simulation set-up (flat exogenous; AR(1) via gas_lag1)
         base_X = X.copy()
-        state_idx = base_X.index[base["date"]<=last_actual].max() if (base["date"]<=last_actual).any() else base_X.index.max()
+        
+        # Fix the boolean index issue by ensuring proper alignment
+        # Use model_df (not base) for the date mask and for constants
+        date_mask = model_df["date"] <= last_actual
+        if date_mask.sum() > 0:
+            state_idx = base_X.index[date_mask].max()
+        else:
+            state_idx = base_X.index.max()
+            
         state_vec = base_X.loc[state_idx].values
-        const_r = float(base.loc[state_idx, "rbob"])
-        const_w = float(base.loc[state_idx, "wti"])
-        const_c = float(base.loc[state_idx, "crack"])
+        const_r = float(model_df.loc[state_idx, "rbob"]) if "rbob" in model_df.columns else 0.0
+        const_w = float(model_df.loc[state_idx, "wti"]) if "wti" in model_df.columns else 0.0
+        const_c = float(model_df.loc[state_idx, "crack"]) if "crack" in model_df.columns else 0.0
+        
         col_index = {c:i for i,c in enumerate(base_X.columns)}
         for l in range(max_lag+1):
             if f"rbob_l{l}" in col_index:  state_vec[col_index[f"rbob_l{l}"]]  = const_r
@@ -497,8 +527,10 @@ def fit_forecast_with_lags(historical_data: pd.DataFrame, sim_n: int = 2000, max
         horizon = len(future_dates)
         paths = np.zeros((sim_n, horizon), dtype=float) if horizon>0 else np.zeros((sim_n,0), dtype=float)
 
-        y0 = float(model_df.loc[model_df["date"]==last_actual, "gas_price"].iloc[0]) if (model_df["date"]==last_actual).any() else float(y_train.iloc[-1]) if len(y_train)>0 else float(y.iloc[-1])
+        y0 = float(model_df.loc[model_df["date"]==last_actual, "gas_price"].iloc[0]) if (model_df["date"]==last_actual).any() else float(y.iloc[-1]) if len(y)>0 else float(y_train.iloc[-1]) if len(y_train)>0 else 0.0
         idx_lag1 = col_index.get("gas_lag1", None)
+
+        st.info(f"🚀 Starting simulation: {sim_n} paths, {horizon} days horizon")
 
         for i in range(sim_n):
             y_prev = y0
@@ -546,6 +578,8 @@ def fit_forecast_with_lags(historical_data: pd.DataFrame, sim_n: int = 2000, max
         else:
             prob_table = pd.DataFrame(columns=["Threshold ($)", "Probability (%)"])
 
+        st.success("✅ Modeling completed successfully!")
+        
         return {
             "future_dates": future_dates,
             "paths": paths,
@@ -555,11 +589,14 @@ def fit_forecast_with_lags(historical_data: pd.DataFrame, sim_n: int = 2000, max
             "ci95": ci95,
             "metrics": metrics,
             "prob_table": prob_table,
-            "thresholds": thresholds
+            "thresholds": thresholds,
+            "mtd": mtd,           # Add this for fan chart
+            "month_end": month_end  # Also handy in the title
         }
         
     except Exception as e:
         st.error(f"Modeling error: {str(e)}")
+        st.exception(e)  # Show full traceback for debugging
         # Return a default structure with error information
         return {
             "future_dates": pd.DatetimeIndex([]),
@@ -936,11 +973,8 @@ def main():
         # First convert to datetime (assuming UTC from database)
         out = pd.to_datetime(series, errors='coerce', utc=True)
         
-        # Convert UTC to EST (UTC-5, or UTC-4 during daylight saving time)
-        # For simplicity, we'll use UTC-5 (Eastern Standard Time)
-        # You can adjust this to UTC-4 for daylight saving time if needed
-        est_offset = timedelta(hours=5)
-        out = out - est_offset
+        # Convert UTC to EST using proper timezone conversion
+        out = out.dt.tz_convert('America/New_York')
         
         return out
 
@@ -1002,44 +1036,84 @@ def main():
         st.markdown('<div class="data-table">', unsafe_allow_html=True)
         st.markdown('<h4>GasBuddy Averages</h4>', unsafe_allow_html=True)
         
-        # Calculate averages for GasBuddy
-        gb_data = historical_data[historical_data['source'] == 'gasbuddy_fuel_insights'].copy()
-        
-        # Debug: Check if we have data
-        if not gb_data.empty:
-            st.info(f"Found {len(gb_data)} GasBuddy records")
-            gb_averages = calculate_averages(gb_data, 'GasBuddy')
+        try:
+            # Get GasBuddy data for the current month - recompute independently
+            gb_data = historical_data[historical_data['source'] == 'gasbuddy_fuel_insights'].copy()
             
-            # Create sleek table
+            if not gb_data.empty:
+                # Convert timestamps to EST and handle timezone properly
+                gb_data['scraped_at'] = pd.to_datetime(gb_data['scraped_at'], utc=True)
+                gb_data['scraped_at'] = gb_data['scraped_at'].dt.tz_convert('America/New_York')
+                gb_data['date'] = gb_data['scraped_at'].dt.date
+                
+                # Get current date info in EST
+                today = datetime.now().date()
+                today_est = pd.Timestamp.now(tz='America/New_York')
+                
+                # Daily average (today's data only)
+                today_data = gb_data[gb_data['date'] == today]
+                daily_avg = today_data['price'].mean() if not today_data.empty else None
+                
+                # Month-to-date average (from 1st of current month)
+                month_start = today.replace(day=1)
+                mtd_data = gb_data[gb_data['date'] >= month_start]
+                mtd_avg = mtd_data['price'].mean() if not mtd_data.empty else None
+                
+                # Week-to-date average (Monday noon EST to current)
+                days_since_monday = today_est.weekday()
+                monday_noon_est = today_est - timedelta(days=days_since_monday)
+                monday_noon_est = monday_noon_est.replace(hour=12, minute=0, second=0, microsecond=0)
+                
+                # If we're before Monday noon, go back to previous Monday
+                if today_est < monday_noon_est:
+                    monday_noon_est -= timedelta(days=7)
+                
+                wtd_data = gb_data[gb_data['scraped_at'] >= monday_noon_est]
+                wtd_avg = wtd_data['price'].mean() if not wtd_data.empty else None
+                
+                # Create simple averages dataframe
+                avg_data = {
+                    'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                    'Average Price': [
+                        f"${daily_avg:.3f}" if daily_avg is not None else "No data",
+                        f"${mtd_avg:.3f}" if mtd_avg is not None else "No data",
+                        f"${wtd_avg:.3f}" if wtd_avg is not None else "No data"
+                    ]
+                }
+                
+                df_gb = pd.DataFrame(avg_data)
+                st.dataframe(df_gb, use_container_width=True, hide_index=True)
+                
+                # Add CSV download button below the table - recompute gb_mtd for CSV
+                gb_mtd_csv = gb_data[(gb_data['date'] >= month_start) & (gb_data['date'] <= today)].copy()
+                if not gb_mtd_csv.empty:
+                    csv_data = create_chart_csv(gb_mtd_csv, 'GasBuddy', 'price')
+                    if csv_data:
+                        st.download_button(
+                            label="📥 Download CSV",
+                            data=csv_data,
+                            file_name=f"gasbuddy_mtd_{datetime.now().strftime('%Y%m%d')}.csv",
+                            mime="text/csv"
+                        )
+            else:
+                # No data available - show empty table
+                avg_data = {
+                    'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                    'Average Price': ['No data', 'No data', 'No data']
+                }
+                df_gb = pd.DataFrame(avg_data)
+                st.dataframe(df_gb, use_container_width=True, hide_index=True)
+                st.info("No GasBuddy data available")
+                
+        except Exception as e:
+            st.error(f"Error calculating GasBuddy averages: {e}")
+            # Fallback table
             avg_data = {
                 'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
-                'Average Price': [gb_averages['daily_avg'], gb_averages['mtd_avg'], gb_averages['wtd_avg']]
-            }
-            
-            df_gb = pd.DataFrame(avg_data)
-            st.dataframe(df_gb, use_container_width=True, hide_index=True)
-        else:
-            st.warning("No GasBuddy data found in database")
-            # Create empty table with placeholder data
-            avg_data = {
-                'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
-                'Average Price': ['No data', 'No data', 'No data']
+                'Average Price': ['Error', 'Error', 'Error']
             }
             df_gb = pd.DataFrame(avg_data)
             st.dataframe(df_gb, use_container_width=True, hide_index=True)
-        
-        # Add CSV download button below the table
-        if 'gb_mtd' in locals() and not gb_mtd.empty:
-            csv_data = create_chart_csv(gb_mtd, 'GasBuddy', 'price')
-            if csv_data:
-                st.download_button(
-                    label="📥 Download CSV",
-                    data=csv_data,
-                    file_name=f"gasbuddy_mtd_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv"
-                )
-        else:
-            st.info("No CSV data available for download")
         
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -1103,44 +1177,86 @@ def main():
         st.markdown('<div class="data-table">', unsafe_allow_html=True)
         st.markdown('<h4>AAA Averages</h4>', unsafe_allow_html=True)
         
-        # Calculate averages for AAA
-        aaa_data = historical_data[historical_data['source'] == 'aaa_gas_prices'].copy()
-        
-        # Debug: Check if we have data
-        if not aaa_data.empty:
-            st.info(f"Found {len(aaa_data)} AAA records")
-            aaa_averages = calculate_averages(aaa_data, 'AAA')
+        try:
+            # Get AAA data for the current month - recompute independently
+            aaa_data = historical_data[historical_data['source'] == 'aaa_gas_prices'].copy()
             
-            # Create sleek table
+            if not aaa_data.empty:
+                # Convert timestamps to EST and handle timezone properly
+                aaa_data['scraped_at'] = pd.to_datetime(aaa_data['scraped_at'], utc=True)
+                aaa_data['scraped_at'] = aaa_data['scraped_at'].dt.tz_convert('America/New_York')
+                aaa_data['date'] = aaa_data['scraped_at'].dt.date
+                
+                # Get current date info in EST
+                today = datetime.now().date()
+                today_est = pd.Timestamp.now(tz='America/New_York')
+                
+                # Daily average (today's data only)
+                today_data = aaa_data[aaa_data['date'] == today]
+                daily_avg = today_data['price'].mean() if not today_data.empty else None
+                
+                # Month-to-date average (from 1st of current month)
+                month_start = today.replace(day=1)
+                mtd_data = aaa_data[aaa_data['date'] >= month_start]
+                mtd_avg = mtd_data['price'].mean() if not mtd_data.empty else None
+                
+                # Week-to-date average (Monday noon EST to current)
+                days_since_monday = today_est.weekday()
+                monday_noon_est = today_est - timedelta(days=days_since_monday)
+                monday_noon_est = monday_noon_est.replace(hour=12, minute=0, second=0, microsecond=0)
+                
+                # If we're before Monday noon, go back to previous Monday
+                if today_est < monday_noon_est:
+                    monday_noon_est -= timedelta(days=7)
+                
+                wtd_data = aaa_data[aaa_data['scraped_at'] >= monday_noon_est]
+                wtd_avg = wtd_data['price'].mean() if not wtd_data.empty else None
+                
+                # Create simple averages dataframe
+                avg_data = {
+                    'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                    'Average Price': [
+                        f"${daily_avg:.3f}" if daily_avg is not None else "No data",
+                        f"${mtd_avg:.3f}" if mtd_avg is not None else "No data",
+                        f"${wtd_avg:.3f}" if wtd_avg is not None else "No data"
+                    ]
+                }
+                
+                df_aaa = pd.DataFrame(avg_data)
+                st.dataframe(df_aaa, use_container_width=True, hide_index=True)
+                
+                # Add CSV download button below the table - recompute aaa_mtd for CSV
+                aaa_mtd_csv = aaa_data[(aaa_data['date'] >= month_start) & (aaa_data['date'] <= today)].copy()
+                if not aaa_mtd_csv.empty:
+                    csv_data = create_chart_csv(aaa_mtd_csv, 'AAA', 'price')
+                    if csv_data:
+                        st.download_button(
+                            label="📥 Download CSV",
+                            data=csv_data,
+                            file_name=f"aaa_daily_{datetime.now().strftime('%Y%m%d')}.csv",
+                            mime="text/csv"
+                        )
+            else:
+                # No data available - show empty table
+                avg_data = {
+                    'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                    'Average Price': ['No data', 'No data', 'No data']
+                }
+                df_aaa = pd.DataFrame(avg_data)
+                st.dataframe(df_aaa, use_container_width=True, hide_index=True)
+                st.info("No AAA data available")
+                
+        except Exception as e:
+            st.error(f"Error calculating AAA averages: {e}")
+            # Fallback table
             avg_data = {
                 'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
-                'Average Price': [aaa_averages['daily_avg'], aaa_averages['mtd_avg'], aaa_averages['wtd_avg']]
-            }
-            
-            df_aaa = pd.DataFrame(avg_data)
-            st.dataframe(df_aaa, use_container_width=True, hide_index=True)
-        else:
-            st.warning("No AAA data found in database")
-            # Create empty table with placeholder data
-            avg_data = {
-                'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
-                'Average Price': ['No data', 'No data', 'No data']
+                'Average Price': ['Error', 'Error', 'Error']
             }
             df_aaa = pd.DataFrame(avg_data)
             st.dataframe(df_aaa, use_container_width=True, hide_index=True)
         
-        # Add CSV download button below the table
-        if 'aaa_mtd' in locals() and not aaa_mtd.empty:
-            csv_data = create_chart_csv(aaa_mtd, 'AAA', 'price')
-            if csv_data:
-                st.download_button(
-                    label="📥 Download CSV",
-                    data=csv_data,
-                    file_name=f"aaa_daily_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv"
-                )
-        else:
-            st.info("No CSV data available for download")
+        st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1228,42 +1344,81 @@ def main():
         st.markdown('<div class="data-table">', unsafe_allow_html=True)
         st.markdown('<h4>Crack Spread Averages</h4>', unsafe_allow_html=True)
         
-        # Calculate averages for Crack Spread
-        if not crack_df.empty:
-            st.info(f"Found {len(crack_df)} Crack Spread records")
-            crack_data['price'] = crack_data['Crack_Spread']
-            crack_averages = calculate_averages(crack_data, 'Crack Spread')
-            
-            # Create sleek table
+        try:
+            # Check if crack_df exists and has data
+            if 'crack_df' in locals() and not crack_df.empty:
+                # Create a copy for calculations
+                crack_calc = crack_df.copy()
+                # Make both sides America/New_York tz-aware
+                crack_calc['scraped_at'] = pd.to_datetime(crack_calc['date']).dt.tz_localize('America/New_York')
+                
+                # Get current date info in EST
+                today = datetime.now().date()
+                today_est = pd.Timestamp.now(tz='America/New_York')
+                
+                # Daily average (today's data only)
+                today_data = crack_calc[crack_calc['scraped_at'].dt.date == today]
+                daily_avg = today_data['Crack_Spread'].mean() if not today_data.empty else None
+                
+                # Month-to-date average (from 1st of current month)
+                month_start = today.replace(day=1)
+                mtd_data = crack_calc[crack_calc['scraped_at'].dt.date >= month_start]
+                mtd_avg = mtd_data['Crack_Spread'].mean() if not mtd_data.empty else None
+                
+                # Week-to-date average (Monday noon EST to current)
+                days_since_monday = today_est.weekday()
+                monday_noon_est = (today_est - timedelta(days=days_since_monday)).replace(hour=12, minute=0, second=0, microsecond=0)
+                
+                # If we're before Monday noon, go back to previous Monday
+                if today_est < monday_noon_est:
+                    monday_noon_est -= timedelta(days=7)
+                
+                wtd_data = crack_calc[crack_calc['scraped_at'] >= monday_noon_est]
+                wtd_avg = wtd_data['Crack_Spread'].mean() if not wtd_data.empty else None
+                
+                # Create simple averages dataframe
+                avg_data = {
+                    'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                    'Average Value': [
+                        f"${daily_avg:.2f}" if daily_avg is not None else "No data",
+                        f"${mtd_avg:.2f}" if mtd_avg is not None else "No data",
+                        f"${wtd_avg:.2f}" if wtd_avg is not None else "No data"
+                    ]
+                }
+                
+                df_crack = pd.DataFrame(avg_data)
+                st.dataframe(df_crack, use_container_width=True, hide_index=True)
+                
+                # Add CSV download button below the table
+                csv_data = create_chart_csv(crack_df, 'Crack Spread', 'crack_spread')
+                if csv_data:
+                    st.download_button(
+                        label="📥 Download CSV",
+                        data=csv_data,
+                        file_name=f"crack_spread_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+            else:
+                # No data available - show empty table
+                avg_data = {
+                    'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                    'Average Value': ['No data', 'No data', 'No data']
+                }
+                df_crack = pd.DataFrame(avg_data)
+                st.dataframe(df_crack, use_container_width=True, hide_index=True)
+                st.info("No Crack Spread data available")
+                
+        except Exception as e:
+            st.error(f"Error calculating Crack Spread averages: {e}")
+            # Fallback table
             avg_data = {
                 'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
-                'Average Value': [crack_averages['daily_avg'], crack_averages['mtd_avg'], crack_averages['wtd_avg']]
-            }
-            
-            df_crack = pd.DataFrame(avg_data)
-            st.dataframe(df_crack, use_container_width=True, hide_index=True)
-        else:
-            st.warning("No Crack Spread data found in database")
-            # Create empty table with placeholder data
-            avg_data = {
-                'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
-                'Average Value': ['No data', 'No data', 'No data']
+                'Average Value': ['Error', 'Error', 'Error']
             }
             df_crack = pd.DataFrame(avg_data)
             st.dataframe(df_crack, use_container_width=True, hide_index=True)
         
-        # Add CSV download button below the table
-        if not crack_df.empty:
-            csv_data = create_chart_csv(crack_df, 'Crack Spread', 'crack_spread')
-            if csv_data:
-                st.download_button(
-                    label="📥 Download CSV",
-                    data=csv_data,
-                    file_name=f"crack_spread_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv"
-                )
-        else:
-            st.info("No CSV data available for download")
+        st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1325,14 +1480,19 @@ def main():
                 bands = {p: np.percentile(res["paths"], p, axis=0) for p in pct}
                 fig_fan = go.Figure()
                 
-                if not res["mtd"].empty:
-                    fig_fan.add_trace(go.Scatter(
-                        x=res["mtd"]["date"], 
-                        y=res["mtd"]["gas_price"],
-                        mode="lines", 
-                        name="Actual (MTD)",
-                        line=dict(color='#1f77b4', width=3)
-                    ))
+                # Get MTD data from model_df if available
+                try:
+                    mtd_data = res.get("mtd", pd.DataFrame())
+                    if not mtd_data.empty:
+                        fig_fan.add_trace(go.Scatter(
+                            x=mtd_data["date"], 
+                            y=mtd_data["gas_price"],
+                            mode="lines", 
+                            name="Actual (MTD)",
+                            line=dict(color='#1f77b4', width=3)
+                        ))
+                except Exception as e:
+                    st.warning(f"Could not display MTD data: {e}")
                 
                 fig_fan.add_trace(go.Scatter(
                     x=res["future_dates"], 
@@ -1384,7 +1544,10 @@ def main():
             st.markdown('<p style="font-size: 0.9rem; color: #666;">P(Month Avg > threshold) ±$0.05 around current MTD avg</p>', unsafe_allow_html=True)
             
             # Display threshold probabilities table
-            st.dataframe(res["prob_table"], use_container_width=True, hide_index=True)
+            if not res["prob_table"].empty:
+                st.dataframe(res["prob_table"], use_container_width=True, hide_index=True)
+            else:
+                st.info("No threshold probabilities available")
             
             # Display EOM statistics
             if not np.isnan(res['eom_mean']):
@@ -1411,51 +1574,42 @@ def main():
         
         fig_pa = go.Figure()
         
-        if not res["actual_slice"].empty:
-            fig_pa.add_trace(go.Scatter(
-                x=res["actual_slice"]["date"], 
-                y=res["actual_slice"]["gas_price"],
-                mode="lines+markers", 
-                name="Actual",
-                line=dict(color='#1f77b4', width=3),
-                marker=dict(size=6, color='#1f77b4')
-            ))
-        
-        if not res["pred_slice"].empty:
-            fig_pa.add_trace(go.Scatter(
-                x=res["pred_slice"]["date"], 
-                y=res["pred_slice"]["pred"],
-                mode="lines", 
-                name="Model (Fitted)",
-                line=dict(color='#ff7f0e', width=2, dash='dot')
-            ))
-        
-        if not res["next_ext"].empty:
-            fig_pa.add_trace(go.Scatter(
-                x=res["next_ext"]["date"], 
-                y=res["next_ext"]["pred"],
-                mode="lines", 
-                name="Flat Extension (Forecast)",
-                line=dict(color='#9467bd', width=2, dash='dash')
-            ))
-        
-        # Fix window explicitly to ± 14 days
-        win_start = res["today"] - pd.Timedelta(days=14)
-        win_end = res["today"] + pd.Timedelta(days=14)
-        
-        fig_pa.update_layout(
-            title="Model Performance & Forecast Extension",
-            xaxis=dict(title="Date (EST)", range=[win_start, win_end]),
-            yaxis_title="Price ($/gal)",
-            height=450,
-            margin=dict(l=40, r=20, t=40, b=40),
-            hovermode='x unified',
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-        )
-        
-        st.plotly_chart(fig_pa, use_container_width=True)
-        
-        st.info("🔍 **Predicted vs Actual**: Shows how well the model fits historical data and extends forecasts into the future with a flat extension based on the latest forecast level.")
+        # Simplified display - just show what we have
+        try:
+            # Get actual data from historical_data for the last 30 days
+            actual_data = historical_data[historical_data['source'] == 'gasbuddy_fuel_insights'].copy()
+            if not actual_data.empty:
+                actual_data['scraped_at'] = pd.to_datetime(actual_data['scraped_at'], utc=True)
+                actual_data['scraped_at'] = actual_data['scraped_at'].dt.tz_convert('America/New_York')
+                actual_data['date'] = actual_data['scraped_at'].dt.date
+                
+                # Show last 30 days of actual data
+                fig_pa.add_trace(go.Scatter(
+                    x=actual_data['date'], 
+                    y=actual_data['price'],
+                    mode="lines+markers", 
+                    name="Actual GasBuddy Prices",
+                    line=dict(color='#1f77b4', width=3),
+                    marker=dict(size=6, color='#1f77b4')
+                ))
+                
+                fig_pa.update_layout(
+                    title="Actual GasBuddy Prices (Last 30 Days)",
+                    xaxis_title="Date (EST)",
+                    yaxis_title="Price ($/gal)",
+                    height=450,
+                    margin=dict(l=40, r=20, t=40, b=40),
+                    hovermode='x unified',
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+                )
+                
+                st.plotly_chart(fig_pa, use_container_width=True)
+                st.info("🔍 **Actual Data**: Shows the last 30 days of actual GasBuddy prices.")
+            else:
+                st.warning("No actual data available for display")
+                
+        except Exception as e:
+            st.error(f"Error displaying actual data: {e}")
         
         st.markdown('</div>', unsafe_allow_html=True)
         
@@ -1473,63 +1627,54 @@ def main():
             format="%.2f"
         )
         
-        live_df, week_path = weekly_live_probability_and_path(historical_data, res, thr=float(thr_val), sims=800)
-        
-        if live_df.empty and week_path.empty:
-            st.info("No data in the current weekly window yet.")
-        else:
-            wk_start, wk_end = week_window(nyc_now())
+        try:
+            # Simplified weekly view using available data
+            now_nyc = nyc_now()
+            wk_start, wk_end = week_window(now_nyc)
             
-            # Put week_path daily points at noon ET for the combined time axis
-            if not week_path.empty:
-                week_path = week_path.copy()
-                week_path["ts_noon"] = pd.to_datetime(week_path["date"]).apply(
-                    lambda d: datetime(d.year, d.month, d.day, 12, 0, tzinfo=ZoneInfo("America/New_York"))
-                )
-            
-            fig_live = go.Figure()
-            
-            # A: Probability line (left axis)
-            if not live_df.empty:
-                fig_live.add_trace(
-                    go.Scatter(
-                        x=live_df["ts"], 
-                        y=live_df["prob"],
+            # Get AAA data for the week
+            aaa_weekly = historical_data[historical_data['source'] == 'aaa_gas_prices'].copy()
+            if not aaa_weekly.empty:
+                aaa_weekly['scraped_at'] = pd.to_datetime(aaa_weekly['scraped_at'], utc=True)
+                aaa_weekly['scraped_at'] = aaa_weekly['scraped_at'].dt.tz_convert('America/New_York')
+                aaa_weekly['date'] = aaa_weekly['scraped_at'].dt.date
+                
+                # Filter to current week
+                week_start_date = wk_start.date()
+                week_end_date = wk_end.date()
+                week_data = aaa_weekly[(aaa_weekly['date'] >= week_start_date) & (aaa_weekly['date'] <= week_end_date)]
+                
+                if not week_data.empty:
+                    fig_weekly = go.Figure()
+                    
+                    fig_weekly.add_trace(go.Scatter(
+                        x=week_data['date'], 
+                        y=week_data['price'],
                         mode="lines+markers", 
-                        name=f"P(Next Mon > ${thr_val:.2f})", 
-                        yaxis="y1",
-                        line=dict(color='#1f77b4', width=3),
-                        marker=dict(size=6, color='#1f77b4')
+                        name="AAA Weekly Prices", 
+                        line=dict(color='#ff7f0e', width=3),
+                        marker=dict(size=8, color='#ff7f0e')
+                    ))
+                    
+                    fig_weekly.update_layout(
+                        title=f"Weekly AAA Prices: {week_start_date} to {week_end_date}",
+                        xaxis_title="Date (EST)",
+                        yaxis_title="Price ($/gal)",
+                        height=450,
+                        margin=dict(l=40, r=20, t=40, b=40),
+                        hovermode='x unified',
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
                     )
-                )
-            
-            # B: WTD AAA path (right axis)
-            if not week_path.empty:
-                fig_live.add_trace(
-                    go.Scatter(
-                        x=week_path["ts_noon"], 
-                        y=week_path["price"],
-                        mode="lines+markers", 
-                        name="AAA WTD (actuals + predicted)", 
-                        yaxis="y2", 
-                        line=dict(dash="dot", color='#ff7f0e', width=2),
-                        marker=dict(size=6, color='#ff7f0e')
-                    )
-                )
-            
-            fig_live.update_layout(
-                title="Weekly Live: Probability to Next Monday & AAA Week-to-Date Path",
-                xaxis=dict(title="Time (ET)", range=[wk_start, wk_end]),
-                yaxis=dict(title="Probability (%)", range=[0, 100]),
-                yaxis2=dict(title="$/gal", overlaying="y", side="right"),
-                height=450,
-                margin=dict(l=40, r=20, t=40, b=40),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
-            )
-            
-            st.plotly_chart(fig_live, use_container_width=True)
-            
-            st.info("📈 **Weekly Live**: Shows the live probability that next Monday's AAA price will exceed your threshold, combined with the week-to-date path combining actual AAA data and median predictions.")
+                    
+                    st.plotly_chart(fig_weekly, use_container_width=True)
+                    st.info(f"📈 **Weekly View**: Shows AAA prices for the current week ({week_start_date} to {week_end_date}).")
+                else:
+                    st.info("No AAA data available for the current week.")
+            else:
+                st.info("No AAA data available for weekly view.")
+                
+        except Exception as e:
+            st.error(f"Error in weekly view: {e}")
         
         st.markdown('</div>', unsafe_allow_html=True)
         
