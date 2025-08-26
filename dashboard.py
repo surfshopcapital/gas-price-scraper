@@ -37,7 +37,7 @@ st.markdown("""
 .update-metric { text-align: center; }
 .update-metric .metric-label { font-size: 1.1rem; font-weight: bold; color: #1f77b4; margin-bottom: 0.5rem; }
 .update-metric .metric-value { font-size: 0.85rem; color: #6c757d; line-height: 1.3; }
-.data-table { background: #ffffff; border-radius: 0.8rem; padding: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border-left: 4px solid #28a745; }
+.data-table { background: #ffffff; border-radius: 0.8rem; padding: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); height: 100%; display: flex; flex-direction: column; }
 .data-table h4 { color: #2c3e50; margin-bottom: 1rem; text-align: center; }
 </style>
 """, unsafe_allow_html=True)
@@ -208,6 +208,25 @@ def get_next_update_info():
         'eia': next_eia
     }
 
+def create_chart_csv(chart_data, source_name, chart_type):
+    """Create CSV data for chart download"""
+    try:
+        if chart_data.empty:
+            return None
+        
+        # Prepare data for CSV
+        if chart_type == 'crack_spread':
+            csv_data = chart_data[['date', 'Crack_Spread']].copy()
+            csv_data.columns = ['Date', 'Crack_Spread_$']
+        else:
+            csv_data = chart_data[['scraped_at', 'price']].copy()
+            csv_data.columns = ['Timestamp', 'Price_$']
+        
+        return csv_data.to_csv(index=False)
+    except Exception as e:
+        st.error(f"Error creating CSV for {source_name}: {e}")
+        return None
+
 def calculate_averages(data, source_name):
     """Calculate daily, month-to-date, and week-to-date averages for a data source"""
     try:
@@ -232,6 +251,17 @@ def calculate_averages(data, source_name):
         # Get current date and time
         now = datetime.now()
         today = now.date()
+        
+        # Handle duplicates based on source type
+        if source_name == 'AAA':
+            # For AAA: one point per day (last observation of the day)
+            data = data.sort_values('scraped_at').groupby(data['scraped_at'].dt.date).tail(1).reset_index(drop=True)
+        elif source_name == 'GasBuddy':
+            # For GasBuddy: keep all unique timestamps (no duplicates)
+            data = data.drop_duplicates(subset=['scraped_at']).reset_index(drop=True)
+        elif source_name == 'Crack Spread':
+            # For Crack Spread: one point per day (last observation of the day)
+            data = data.sort_values('scraped_at').groupby(data['scraped_at'].dt.date).tail(1).reset_index(drop=True)
         
         # Daily average (today's data only)
         today_data = data[data['scraped_at'].dt.date == today]
@@ -520,7 +550,7 @@ def main():
     # 📈 NEW CHARTS (Bottom Area) - 3/5 width with tables
     # ===========================
     st.markdown("---")
-    st.header("📊 Historical Trends & Analysis")
+    st.header("Historical Trends & Analysis")
 
     # Helper: safe datetime conversion with timezone handling
     def _to_datetime(series):
@@ -548,6 +578,18 @@ def main():
                 gb_mtd = gb[(gb['date'] >= month_start) & (gb['date'] <= today_dt.date())].copy()
                 
                 if not gb_mtd.empty:
+                    # Add CSV download button above the chart
+                    col_csv1, col_csv2 = st.columns([4, 1])
+                    with col_csv2:
+                        csv_data = create_chart_csv(gb_mtd, 'GasBuddy', 'price')
+                        if csv_data:
+                            st.download_button(
+                                label="📥 Download CSV",
+                                data=csv_data,
+                                file_name=f"gasbuddy_mtd_{datetime.now().strftime('%Y%m%d')}.csv",
+                                mime="text/csv"
+                            )
+                    
                     fig_gb = go.Figure()
                     
                     # GasBuddy line connecting each point
@@ -599,6 +641,9 @@ def main():
         df_gb = pd.DataFrame(avg_data)
         st.dataframe(df_gb, use_container_width=True, hide_index=True)
         
+        # Add spacing to fill the height
+        st.markdown("<br>" * 15, unsafe_allow_html=True)
+        
         st.markdown('</div>', unsafe_allow_html=True)
 
     # ---------- 2) AAA Daily Chart (3/5 width) + Table (2/5 width) ----------
@@ -621,6 +666,18 @@ def main():
                 aaa_mtd = aaa[(aaa['date'] >= month_start) & (aaa['date'] <= today_dt.date())].copy()
                 
                 if not aaa_mtd.empty:
+                    # Add CSV download button above the chart
+                    col_csv1, col_csv2 = st.columns([4, 1])
+                    with col_csv2:
+                        csv_data = create_chart_csv(aaa_mtd, 'AAA', 'price')
+                        if csv_data:
+                            st.download_button(
+                                label="📥 Download CSV",
+                                data=csv_data,
+                                file_name=f"aaa_daily_{datetime.now().strftime('%Y%m%d')}.csv",
+                                mime="text/csv"
+                            )
+                    
                     fig_aaa = go.Figure()
                     
                     # AAA line connecting each point
@@ -672,6 +729,9 @@ def main():
         df_aaa = pd.DataFrame(avg_data)
         st.dataframe(df_aaa, use_container_width=True, hide_index=True)
         
+        # Add spacing to fill the height
+        st.markdown("<br>" * 15, unsafe_allow_html=True)
+        
         st.markdown('</div>', unsafe_allow_html=True)
 
     # ---------- 3) Crack Spread Chart (3/5 width) + Table (2/5 width) ----------
@@ -714,6 +774,18 @@ def main():
                     crack_df = crack_df.dropna()
                     
                     if not crack_df.empty:
+                        # Add CSV download button above the chart
+                        col_csv1, col_csv2 = st.columns([4, 1])
+                        with col_csv2:
+                            csv_data = create_chart_csv(crack_df, 'Crack Spread', 'crack_spread')
+                            if csv_data:
+                                st.download_button(
+                                    label="📥 Download CSV",
+                                    data=csv_data,
+                                    file_name=f"crack_spread_{datetime.now().strftime('%Y%m%d')}.csv",
+                                    mime="text/csv"
+                                )
+                        
                         fig_crack = go.Figure()
                         
                         # Main crack spread line
@@ -764,6 +836,7 @@ def main():
                 # Create a temporary dataframe with the crack spread data for averaging
                 crack_data = crack_df[['date', 'Crack_Spread']].copy()
                 crack_data['scraped_at'] = pd.to_datetime(crack_data['date'])
+                crack_data['price'] = crack_data['Crack_Spread']  # Map to 'price' for the calculate_averages function
                 
                 # Calculate averages using the same function
                 crack_averages = calculate_averages(crack_data, 'Crack Spread')
@@ -776,6 +849,9 @@ def main():
                 
                 df_crack = pd.DataFrame(avg_data)
                 st.dataframe(df_crack, use_container_width=True, hide_index=True)
+                
+                # Add spacing to fill the height
+                st.markdown("<br>" * 15, unsafe_allow_html=True)
             else:
                 st.warning("No crack spread data available for averages")
         except Exception as e:
