@@ -815,29 +815,47 @@ class GasScraper:
         """Set up all scheduled jobs without starting the blocking loop"""
         print("🚗 Hexa Source Gas Scraper (Playwright) — Scheduled Mode")
         print("=" * 50)
-        print("• GasBuddy: every 15 min")
-        print("• AAA: daily 12:01 AM PT (03:01 ET)")
-        print("• RBOB & WTI: every 2h Mon 06:00 UTC — Fri 04:00 UTC")
+        print("• GasBuddy: every 10 min")
+        print("• AAA: daily 3:01 AM ET")
+        print("• RBOB & WTI: every hour Sun 6pm-Fri 8pm EST")
         print("• EIA (TE pages): daily 15:35 UTC")
         print("• Daily Excel: 22:00 UTC")
         print("• Monthly Excel check: 22:00 UTC (run if day==1)")
         print("=" * 50)
 
-        schedule.every(15).minutes.do(self.run_gasbuddy_job)
+        # GasBuddy: every 10 minutes (changed from 15)
+        schedule.every(10).minutes.do(self.run_gasbuddy_job)
+        
+        # AAA: daily at 3:01 AM ET
         schedule.every().day.at("03:01").do(self.run_aaa_job)
+        
+        # EIA (TE pages): daily at 15:35 UTC
         schedule.every().day.at("15:35").do(self.run_gasoline_stocks_job)
         schedule.every().day.at("15:35").do(self.run_refinery_runs_job)
+        
+        # Daily Excel: 22:00 UTC
         schedule.every().day.at("22:00").do(self.export_daily_excel)
         schedule.every().day.at("22:00").do(self._monthly_check)
+        
+        # Daily backup: 23:00 UTC
         schedule.every().day.at("23:00").do(self._daily_backup_safe)
 
-        for hour in range(6, 24, 2):
-            for day in ("monday","tuesday","wednesday","thursday","friday"):
+        # RBOB & WTI: every hour from Sunday 6pm EST to Friday 8pm EST
+        # Sunday: 6pm-11pm EST (23:00-04:00 UTC next day)
+        for hour in range(23, 24):
+            schedule.every().sunday.at(f"{hour:02d}:00").do(self.run_rbob_job)
+            schedule.every().sunday.at(f"{hour:02d}:00").do(self.run_wti_job)
+        
+        # Monday-Thursday: every hour from 6am-11pm EST (11:00-04:00 UTC next day)
+        for hour in range(11, 24):
+            for day in ("monday", "tuesday", "wednesday", "thursday"):
                 getattr(schedule.every(), day).at(f"{hour:02d}:00").do(self.run_rbob_job)
                 getattr(schedule.every(), day).at(f"{hour:02d}:00").do(self.run_wti_job)
-        for hh in ("00:00","02:00","04:00"):
-            schedule.every().friday.at(hh).do(self.run_rbob_job)
-            schedule.every().friday.at(hh).do(self.run_wti_job)
+        
+        # Friday: every hour from 6am-8pm EST (11:00-01:00 UTC next day)
+        for hour in range(11, 25):  # 25 = 01:00 UTC next day
+            schedule.every().friday.at(f"{hour:02d}:00").do(self.run_rbob_job)
+            schedule.every().friday.at(f"{hour:02d}:00").do(self.run_wti_job)
 
         print("✅ Scheduler started")
 

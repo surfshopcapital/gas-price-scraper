@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import select
+import socket
 import schedule
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from gas_scraper import GasScraper
@@ -83,8 +84,12 @@ def main():
         last_status_time = time.time()
         while True:
             try:
-                # Handle HTTP requests (non-blocking)
-                server.handle_request()
+                # Handle HTTP requests (non-blocking with timeout)
+                server.socket.settimeout(0.1)  # 100ms timeout
+                try:
+                    server.handle_request()
+                except socket.timeout:
+                    pass  # No request, continue to scheduler
                 
                 # Run pending scheduled tasks
                 import schedule
@@ -96,6 +101,14 @@ def main():
                 current_time = time.time()
                 if current_time - last_status_time > 300:  # 5 minutes
                     print(f"🔄 Scheduler heartbeat @ {time.strftime('%Y-%m-%d %H:%M:%S')} - {len(schedule.get_jobs())} jobs registered")
+                    
+                    # Show next few scheduled jobs
+                    next_jobs = schedule.get_jobs()
+                    if next_jobs:
+                        print(f"   📅 Next jobs:")
+                        for i, job in enumerate(next_jobs[:3]):  # Show next 3 jobs
+                            print(f"      {i+1}. {job.job_func.__name__} @ {job.next_run}")
+                    
                     last_status_time = current_time
                 
                 # Small sleep to prevent CPU spinning
