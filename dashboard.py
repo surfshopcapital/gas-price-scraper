@@ -38,11 +38,12 @@ st.markdown("""
 .update-metric .metric-label { font-size: 1.1rem; font-weight: bold; color: #1f77b4; margin-bottom: 0.5rem; }
 .update-metric .metric-value { font-size: 0.85rem; color: #6c757d; line-height: 1.3; }
 .data-table { background: #ffffff; border-radius: 0.8rem; padding: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); height: 100%; display: flex; flex-direction: column; justify-content: flex-start; }
-.data-table h4 { color: #2c3e50; margin: 0 0 1rem 0; text-align: center; }
+.data-table h4 { color: #2c3e50; margin: 0 0 1rem 0; text-align: center; padding: 0; }
 .data-table .stDataFrame { flex: 1; }
 .chart-section { margin-bottom: 1rem; }
 .stDataFrame > div { height: 100% !important; }
 .stDataFrame > div > div { height: 100% !important; }
+.stDownloadButton { margin-top: 1rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -583,18 +584,6 @@ def main():
                 gb_mtd = gb[(gb['date'] >= month_start) & (gb['date'] <= today_dt.date())].copy()
                 
                 if not gb_mtd.empty:
-                    # Add CSV download button above the chart
-                    col_csv1, col_csv2 = st.columns([4, 1])
-                    with col_csv2:
-                        csv_data = create_chart_csv(gb_mtd, 'GasBuddy', 'price')
-                        if csv_data:
-                            st.download_button(
-                                label="📥 Download CSV",
-                                data=csv_data,
-                                file_name=f"gasbuddy_mtd_{datetime.now().strftime('%Y%m%d')}.csv",
-                                mime="text/csv"
-                            )
-                    
                     fig_gb = go.Figure()
                     
                     # GasBuddy line connecting each point
@@ -608,11 +597,10 @@ def main():
                     ))
                     
                     fig_gb.update_layout(
-                        title="GasBuddy Month-to-Date: Live Ticking Prices",
                         xaxis_title="Date & Time",
                         yaxis_title="Price ($/gal)",
                         height=450,
-                        margin=dict(l=40, r=20, t=60, b=40),
+                        margin=dict(l=40, r=20, t=40, b=40),
                         hovermode='x unified',
                         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
                     )
@@ -646,6 +634,16 @@ def main():
         df_gb = pd.DataFrame(avg_data)
         st.dataframe(df_gb, use_container_width=True, hide_index=True)
         
+        # Add CSV download button below the table
+        csv_data = create_chart_csv(gb_mtd, 'GasBuddy', 'price')
+        if csv_data:
+            st.download_button(
+                label="📥 Download CSV",
+                data=csv_data,
+                file_name=f"gasbuddy_mtd_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+        
         st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown('</div>', unsafe_allow_html=True)
@@ -671,18 +669,6 @@ def main():
                 aaa_mtd = aaa[(aaa['date'] >= month_start) & (aaa['date'] <= today_dt.date())].copy()
                 
                 if not aaa_mtd.empty:
-                    # Add CSV download button above the chart
-                    col_csv1, col_csv2 = st.columns([4, 1])
-                    with col_csv2:
-                        csv_data = create_chart_csv(aaa_mtd, 'AAA', 'price')
-                        if csv_data:
-                            st.download_button(
-                                label="📥 Download CSV",
-                                data=csv_data,
-                                file_name=f"aaa_daily_{datetime.now().strftime('%Y%m%d')}.csv",
-                                mime="text/csv"
-                            )
-                    
                     fig_aaa = go.Figure()
                     
                     # AAA line connecting each point
@@ -696,11 +682,10 @@ def main():
                     ))
                     
                     fig_aaa.update_layout(
-                        title="AAA Month-to-Date: Daily National Average",
                         xaxis_title="Date",
                         yaxis_title="Price ($/gal)",
                         height=450,
-                        margin=dict(l=40, r=20, t=60, b=40),
+                        margin=dict(l=40, r=20, t=40, b=40),
                         hovermode='x unified',
                         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
                     )
@@ -733,6 +718,16 @@ def main():
         
         df_aaa = pd.DataFrame(avg_data)
         st.dataframe(df_aaa, use_container_width=True, hide_index=True)
+        
+        # Add CSV download button below the table
+        csv_data = create_chart_csv(aaa_mtd, 'AAA', 'price')
+        if csv_data:
+            st.download_button(
+                label="📥 Download CSV",
+                data=csv_data,
+                file_name=f"aaa_daily_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
         
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -779,18 +774,6 @@ def main():
                     crack_df = crack_df.dropna()
                     
                     if not crack_df.empty:
-                        # Add CSV download button above the chart
-                        col_csv1, col_csv2 = st.columns([4, 1])
-                        with col_csv2:
-                            csv_data = create_chart_csv(crack_df, 'Crack Spread', 'crack_spread')
-                            if csv_data:
-                                st.download_button(
-                                    label="📥 Download CSV",
-                                    data=csv_data,
-                                    file_name=f"crack_spread_{datetime.now().strftime('%Y%m%d')}.csv",
-                                    mime="text/csv"
-                                )
-                        
                         fig_crack = go.Figure()
                         
                         # Main crack spread line
@@ -808,11 +791,10 @@ def main():
                                           annotation_text="Break-even", annotation_position="bottom right")
                         
                         fig_crack.update_layout(
-                            title="Crack Spread: (RBOB × 42) - WTI — Last 30 Days",
                             xaxis_title="Date",
                             yaxis_title="Crack Spread ($)",
                             height=450,
-                            margin=dict(l=40, r=20, t=60, b=40),
+                            margin=dict(l=40, r=20, t=40, b=40),
                             hovermode='x unified',
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
                         )
@@ -854,6 +836,16 @@ def main():
                 
                 df_crack = pd.DataFrame(avg_data)
                 st.dataframe(df_crack, use_container_width=True, hide_index=True)
+                
+                # Add CSV download button below the table
+                csv_data = create_chart_csv(crack_df, 'Crack Spread', 'crack_spread')
+                if csv_data:
+                    st.download_button(
+                        label="📥 Download CSV",
+                        data=csv_data,
+                        file_name=f"crack_spread_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
             else:
                 st.warning("No crack spread data available for averages")
         except Exception as e:
