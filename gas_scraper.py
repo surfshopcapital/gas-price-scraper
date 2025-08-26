@@ -811,7 +811,8 @@ class GasScraper:
     # ---------------------------
     # Scheduler (mirrors yours)
     # ---------------------------
-    def run_scheduled(self):
+    def _setup_scheduler(self):
+        """Set up all scheduled jobs without starting the blocking loop"""
         print("🚗 Hexa Source Gas Scraper (Playwright) — Scheduled Mode")
         print("=" * 50)
         print("• GasBuddy: every 15 min")
@@ -839,6 +840,11 @@ class GasScraper:
             schedule.every().friday.at(hh).do(self.run_wti_job)
 
         print("✅ Scheduler started")
+
+    def run_scheduled(self):
+        # Set up the scheduler first
+        self._setup_scheduler()
+        
         print("🚀 Initial run of all sources once...")
         self.run_all_sources_once()
         print("✅ Initial run complete; continuing on schedule.")

@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import select
+import schedule
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from gas_scraper import GasScraper
 
@@ -69,12 +70,17 @@ def main():
         # Start the scheduler in a non-blocking way
         print("📅 Starting scheduler...")
         
+        # Set up all scheduled jobs (this was missing!)
+        # We need to call the scheduler setup without running the blocking loop
+        scraper._setup_scheduler()
+        
         # Run initial job once
         print("🚀 Initial run of all sources once...")
         scraper.run_all_sources_once()
         print("✅ Initial run complete; continuing on schedule.")
         
         # Run scheduler and HTTP server together
+        last_status_time = time.time()
         while True:
             try:
                 # Handle HTTP requests (non-blocking)
@@ -82,7 +88,15 @@ def main():
                 
                 # Run pending scheduled tasks
                 import schedule
-                schedule.run_pending()
+                jobs_run = schedule.run_pending()
+                if jobs_run:
+                    print(f"✅ Executed {len(jobs_run)} scheduled job(s) @ {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # Show status every 5 minutes to confirm scheduler is alive
+                current_time = time.time()
+                if current_time - last_status_time > 300:  # 5 minutes
+                    print(f"🔄 Scheduler heartbeat @ {time.strftime('%Y-%m-%d %H:%M:%S')} - {len(schedule.get_jobs())} jobs registered")
+                    last_status_time = current_time
                 
                 # Small sleep to prevent CPU spinning
                 time.sleep(0.1)
