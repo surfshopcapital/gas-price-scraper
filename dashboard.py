@@ -37,8 +37,12 @@ st.markdown("""
 .update-metric { text-align: center; }
 .update-metric .metric-label { font-size: 1.1rem; font-weight: bold; color: #1f77b4; margin-bottom: 0.5rem; }
 .update-metric .metric-value { font-size: 0.85rem; color: #6c757d; line-height: 1.3; }
-.data-table { background: #ffffff; border-radius: 0.8rem; padding: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); height: 100%; display: flex; flex-direction: column; }
-.data-table h4 { color: #2c3e50; margin-bottom: 1rem; text-align: center; }
+.data-table { background: #ffffff; border-radius: 0.8rem; padding: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); height: 100%; display: flex; flex-direction: column; justify-content: flex-start; }
+.data-table h4 { color: #2c3e50; margin: 0 0 1rem 0; text-align: center; }
+.data-table .stDataFrame { flex: 1; }
+.chart-section { margin-bottom: 1rem; }
+.stDataFrame > div { height: 100% !important; }
+.stDataFrame > div > div { height: 100% !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -559,6 +563,7 @@ def main():
         return out
 
     # ---------- 1) GasBuddy Month-to-Date Chart (3/5 width) + Table (2/5 width) ----------
+    st.markdown('<div class="chart-section">', unsafe_allow_html=True)
     st.subheader("1. GasBuddy Month-to-Date Prices")
     
     col1, col2 = st.columns([3, 2])
@@ -641,12 +646,12 @@ def main():
         df_gb = pd.DataFrame(avg_data)
         st.dataframe(df_gb, use_container_width=True, hide_index=True)
         
-        # Add spacing to fill the height
-        st.markdown("<br>" * 15, unsafe_allow_html=True)
-        
         st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # ---------- 2) AAA Daily Chart (3/5 width) + Table (2/5 width) ----------
+    st.markdown('<div class="chart-section">', unsafe_allow_html=True)
     st.subheader("2. AAA Daily Gas Prices")
     
     col1, col2 = st.columns([3, 2])
@@ -729,12 +734,12 @@ def main():
         df_aaa = pd.DataFrame(avg_data)
         st.dataframe(df_aaa, use_container_width=True, hide_index=True)
         
-        # Add spacing to fill the height
-        st.markdown("<br>" * 15, unsafe_allow_html=True)
-        
         st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # ---------- 3) Crack Spread Chart (3/5 width) + Table (2/5 width) ----------
+    st.markdown('<div class="chart-section">', unsafe_allow_html=True)
     st.subheader("3. Crack Spread Analysis (Last 30 Days)")
     
     col1, col2 = st.columns([3, 2])
@@ -849,15 +854,14 @@ def main():
                 
                 df_crack = pd.DataFrame(avg_data)
                 st.dataframe(df_crack, use_container_width=True, hide_index=True)
-                
-                # Add spacing to fill the height
-                st.markdown("<br>" * 15, unsafe_allow_html=True)
             else:
                 st.warning("No crack spread data available for averages")
         except Exception as e:
             st.error(f"Error calculating crack spread averages: {e}")
         
         st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # Footer
     st.markdown("---")
