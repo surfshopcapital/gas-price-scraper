@@ -404,139 +404,175 @@ def _add_lags(base: pd.DataFrame, max_lag: int = 14) -> pd.DataFrame:
     return df
 
 def fit_forecast_with_lags(historical_data: pd.DataFrame, sim_n: int = 2000, max_lag: int = 14):
-    base = _daily_panel(historical_data)
-    if base.empty:
-        raise ValueError("No usable daily panel; check inputs.")
-    base = _make_pulses(base)
-    base = _add_lags(base, max_lag=max_lag)
+    try:
+        base = _daily_panel(historical_data)
+        if base.empty:
+            raise ValueError("No usable daily panel; check inputs.")
+        
+        base = _make_pulses(base)
+        base = _add_lags(base, max_lag=max_lag)
 
-    model_df = base.dropna(subset=["gas_price","gas_lag1"]).copy()
+        # More aggressive NaN handling
+        model_df = base.dropna(subset=["gas_price","gas_lag1"]).copy()
+        
+        if model_df.empty:
+            raise ValueError("No data available after removing NaN values in gas_price or gas_lag1")
 
-    lag_cols = ([f"rbob_l{l}" for l in range(max_lag+1)] +
-                [f"wti_l{l}"  for l in range(max_lag+1)] +
-                [f"crack_l{l}" for l in range(max_lag+1)])
-    feat_cols = ["gas_lag1","rbob_up","rbob_down","surprise_pulse","refinery_pulse"] + lag_cols
+        lag_cols = ([f"rbob_l{l}" for l in range(max_lag+1)] +
+                    [f"wti_l{l}"  for l in range(max_lag+1)] +
+                    [f"crack_l{l}" for l in range(max_lag+1)])
+        feat_cols = ["gas_lag1","rbob_up","rbob_down","surprise_pulse","refinery_pulse"] + lag_cols
 
-    X = model_df[feat_cols].copy()
-    y = model_df["gas_price"].copy()
-    X = X.fillna(method="ffill").fillna(method="bfill").fillna(X.mean())
+        # Check if all required columns exist
+        missing_cols = [col for col in feat_cols if col not in model_df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}")
 
-    # time-ordered 80/20 split
-    cut = int(len(model_df)*0.8) if len(model_df) >= 20 else max(1, int(len(model_df)*0.8))
-    X_train, X_test = X.iloc[:cut], X.iloc[cut:]
-    y_train, y_test = y.iloc[:cut], y.iloc[cut:]
+        X = model_df[feat_cols].copy()
+        y = model_df["gas_price"].copy()
+        
+        # More robust NaN handling
+        X = X.fillna(method="ffill").fillna(method="bfill").fillna(X.mean())
+        
+        # Final check for any remaining NaN values
+        if X.isna().any().any():
+            # Drop rows with any remaining NaN values
+            valid_mask = ~X.isna().any(axis=1)
+            X = X[valid_mask]
+            y = y[valid_mask]
+            
+            if X.empty:
+                raise ValueError("No data available after removing all NaN values")
+        
+        # Ensure we have enough data
+        if len(X) < 10:
+            raise ValueError(f"Insufficient data for modeling. Need at least 10 observations, got {len(X)}")
 
-    ridge = RidgeCV(alphas=np.logspace(-4,3,21))
-    ridge.fit(X_train, y_train)
+        # time-ordered 80/20 split
+        cut = int(len(model_df)*0.8) if len(model_df) >= 20 else max(1, int(len(model_df)*0.8))
+        X_train, X_test = X.iloc[:cut], X.iloc[cut:]
+        y_train, y_test = y.iloc[:cut], y.iloc[cut:]
 
-    y_pred = ridge.predict(X_test) if len(X_test)>0 else np.array([])
-    metrics = {
-        "MAE": float(mean_absolute_error(y_test, y_pred)) if len(y_pred)>0 else np.nan,
-        "RMSE": float(mean_squared_error(y_test, y_pred, squared=False)) if len(y_pred)>0 else np.nan,
-        "R2": float(r2_score(y_test, y_pred)) if len(y_pred)>0 else np.nan,
-    }
+        ridge = RidgeCV(alphas=np.logspace(-4,3,21))
+        ridge.fit(X_train, y_train)
 
-    # Month context
-    today = model_df["date"].max()
-    year, month = today.year, today.month
-    days_in_month = pd.Period(today, 'M').days_in_month
-    month_start = pd.Timestamp(year=year, month=month, day=1)
-    month_end   = pd.Timestamp(year=year, month=month, day=days_in_month)
+        y_pred = ridge.predict(X_test) if len(X_test)>0 else np.array([])
+        metrics = {
+            "MAE": float(mean_absolute_error(y_test, y_pred)) if len(y_pred)>0 else np.nan,
+            "RMSE": float(mean_squared_error(y_test, y_pred, squared=False)) if len(y_pred)>0 else np.nan,
+            "R2": float(r2_score(y_test, y_pred)) if len(y_pred)>0 else np.nan,
+        }
 
-    mtd = model_df[(model_df["date"]>=month_start) & (model_df["date"]<=today)][["date","gas_price"]].sort_values("date")
-    mtd_avg = float(mtd["gas_price"].mean()) if not mtd.empty else np.nan
-    last_actual = mtd["date"].max() if not mtd.empty else (month_start - pd.Timedelta(days=1))
+        # Month context
+        today = model_df["date"].max()
+        year, month = today.year, today.month
+        days_in_month = pd.Period(today, 'M').days_in_month
+        month_start = pd.Timestamp(year=year, month=month, day=1)
+        month_end   = pd.Timestamp(year=year, month=month, day=days_in_month)
 
-    # Simulation set-up (flat exogenous; AR(1) via gas_lag1)
-    base_X = X.copy()
-    state_idx = base_X.index[base["date"]<=last_actual].max() if (base["date"]<=last_actual).any() else base_X.index.max()
-    state_vec = base_X.loc[state_idx].values
-    const_r = float(base.loc[state_idx, "rbob"])
-    const_w = float(base.loc[state_idx, "wti"])
-    const_c = float(base.loc[state_idx, "crack"])
-    col_index = {c:i for i,c in enumerate(base_X.columns)}
-    for l in range(max_lag+1):
-        if f"rbob_l{l}" in col_index:  state_vec[col_index[f"rbob_l{l}"]]  = const_r
-        if f"wti_l{l}"  in col_index:  state_vec[col_index[f"wti_l{l}"]]   = const_w
-        if f"crack_l{l}" in col_index: state_vec[col_index[f"crack_l{l}"]] = const_c
-    if "surprise_pulse" in col_index: state_vec[col_index["surprise_pulse"]] = 0.0
-    if "refinery_pulse" in col_index: state_vec[col_index["refinery_pulse"]] = 0.0
-    if "rbob_up" in col_index:   state_vec[col_index["rbob_up"]] = const_r
-    if "rbob_down" in col_index: state_vec[col_index["rbob_down"]] = 0.0
+        mtd = model_df[(model_df["date"]>=month_start) & (model_df["date"]<=today)][["date","gas_price"]].sort_values("date")
+        mtd_avg = float(mtd["gas_price"].mean()) if not mtd.empty else np.nan
+        last_actual = mtd["date"].max() if not mtd.empty else (month_start - pd.Timedelta(days=1))
 
-    resid = (y_train.values - ridge.predict(X_train)) if len(X_train)>0 else np.array([0.0])
+        # Simulation set-up (flat exogenous; AR(1) via gas_lag1)
+        base_X = X.copy()
+        state_idx = base_X.index[base["date"]<=last_actual].max() if (base["date"]<=last_actual).any() else base_X.index.max()
+        state_vec = base_X.loc[state_idx].values
+        const_r = float(base.loc[state_idx, "rbob"])
+        const_w = float(base.loc[state_idx, "wti"])
+        const_c = float(base.loc[state_idx, "crack"])
+        col_index = {c:i for i,c in enumerate(base_X.columns)}
+        for l in range(max_lag+1):
+            if f"rbob_l{l}" in col_index:  state_vec[col_index[f"rbob_l{l}"]]  = const_r
+            if f"wti_l{l}"  in col_index:  state_vec[col_index[f"wti_l{l}"]]   = const_w
+            if f"crack_l{l}" in col_index: state_vec[col_index[f"crack_l{l}"]] = const_c
+        if "surprise_pulse" in col_index: state_vec[col_index["surprise_pulse"]] = 0.0
+        if "refinery_pulse" in col_index: state_vec[col_index["refinery_pulse"]] = 0.0
+        if "rbob_up" in col_index:   state_vec[col_index["rbob_up"]] = const_r
+        if "rbob_down" in col_index: state_vec[col_index["rbob_down"]] = 0.0
 
-    future_dates = pd.date_range(last_actual + pd.Timedelta(days=1), month_end, freq="D")
-    horizon = len(future_dates)
-    paths = np.zeros((sim_n, horizon), dtype=float) if horizon>0 else np.zeros((sim_n,0), dtype=float)
+        resid = (y_train.values - ridge.predict(X_train)) if len(y_train)>0 else np.array([0.0])
 
-    y0 = float(model_df.loc[model_df["date"]==last_actual, "gas_price"].iloc[0]) if (model_df["date"]==last_actual).any() else float(y_train.iloc[-1]) if len(y_train)>0 else float(y.iloc[-1])
-    idx_lag1 = col_index.get("gas_lag1", None)
+        future_dates = pd.date_range(last_actual + pd.Timedelta(days=1), month_end, freq="D")
+        horizon = len(future_dates)
+        paths = np.zeros((sim_n, horizon), dtype=float) if horizon>0 else np.zeros((sim_n,0), dtype=float)
 
-    for i in range(sim_n):
-        y_prev = y0
-        vec = state_vec.copy()
-        for h in range(horizon):
-            if idx_lag1 is not None:
-                vec[idx_lag1] = y_prev
-            y_hat = float(ridge.predict(vec.reshape(1,-1))[0])
-            eps = float(np.random.choice(resid)) if len(resid)>0 else 0.0
-            y_prev = y_hat + eps
-            paths[i,h] = y_prev
+        y0 = float(model_df.loc[model_df["date"]==last_actual, "gas_price"].iloc[0]) if (model_df["date"]==last_actual).any() else float(y_train.iloc[-1]) if len(y_train)>0 else float(y.iloc[-1])
+        idx_lag1 = col_index.get("gas_lag1", None)
 
-    if horizon>0 and np.isfinite(mtd_avg):
-        mtd_days = mtd["date"].dt.date.nunique()
-        eom_means = (mtd_avg*mtd_days + paths.mean(axis=1)*horizon) / (mtd_days + horizon)
-    elif horizon==0 and np.isfinite(mtd_avg):
-        eom_means = np.full(sim_n, mtd_avg, dtype=float)
-    else:
-        eom_means = paths.mean(axis=1) if horizon>0 else np.array([])
+        for i in range(sim_n):
+            y_prev = y0
+            vec = state_vec.copy()
+            for h in range(horizon):
+                if idx_lag1 is not None:
+                    vec[idx_lag1] = y_prev
+                y_hat = float(ridge.predict(vec.reshape(1,-1))[0])
+                eps = float(np.random.choice(resid)) if len(resid)>0 else 0.0
+                y_prev = y_hat + eps
+                paths[i,h] = y_prev
 
-    eom_mean = float(np.mean(eom_means)) if len(eom_means) else np.nan
-    ci5, ci95 = (float(np.percentile(eom_means, 5)), float(np.percentile(eom_means, 95))) if len(eom_means) else (np.nan, np.nan)
+        if horizon>0 and np.isfinite(mtd_avg):
+            mtd_days = mtd["date"].dt.date.nunique()
+            eom_means = (mtd_avg*mtd_days + paths.mean(axis=1)*horizon) / (mtd_days + horizon)
+        elif horizon==0 and np.isfinite(mtd_avg):
+            eom_means = np.full(sim_n, mtd_avg, dtype=float)
+        else:
+            eom_means = paths.mean(axis=1) if horizon>0 else np.array([])
 
-    # Thresholds: 6 values closest to current MTD avg at ±$0.05 steps
-    if np.isfinite(mtd_avg):
-        base_thr = np.round(mtd_avg, 2)
-        offsets = np.array([-0.05,-0.03,-0.01,0.01,0.03,0.05])
-        thr_vals = np.round(base_thr + offsets, 2)
-    else:
-        thr_vals = np.array([3.10,3.12,3.14,3.16,3.18,3.20])
-    prob_tbl = pd.DataFrame({
-        "Threshold ($/gal)": [f"{t:.2f}" for t in thr_vals],
-        "P(Month Avg > threshold)": [f"{(eom_means>t).mean():.1%}" if len(eom_means) else "—" for t in thr_vals]
-    })
+        eom_mean = float(np.mean(eom_means)) if len(eom_means) else np.nan
+        ci5, ci95 = (float(np.percentile(eom_means, 5)), float(np.percentile(eom_means, 95))) if len(eom_means) else (np.nan, np.nan)
 
-    # Pred vs Actual: ± two weeks window around "today"
-    window_start = today - pd.Timedelta(days=14)
-    window_end   = today + pd.Timedelta(days=14)
-    fit_all = ridge.predict(X)
-    fit_df = pd.DataFrame({"date": model_df["date"], "pred": fit_all})
+        # Thresholds: 6 values closest to current MTD avg at ±$0.05 steps
+        if np.isfinite(mtd_avg):
+            base_thr = np.round(mtd_avg, 2)
+            thresholds = np.arange(base_thr-0.25, base_thr+0.26, 0.05)
+            thresholds = thresholds[np.abs(thresholds - mtd_avg) <= 0.25]
+            if len(thresholds) > 6:
+                # Keep 6 closest to mtd_avg
+                distances = np.abs(thresholds - mtd_avg)
+                closest_indices = np.argsort(distances)[:6]
+                thresholds = thresholds[closest_indices]
+            thresholds = np.sort(thresholds)
+        else:
+            thresholds = np.array([])
 
-    pred_slice = fit_df[(fit_df["date"]>=window_start) & (fit_df["date"]<=today)]
-    actual_slice = model_df[(fit_df["date"]>=window_start) & (fit_df["date"]<=today)][["date","gas_price"]]
+        # Probability table
+        if len(thresholds) > 0 and len(eom_means) > 0:
+            prob_data = []
+            for thr in thresholds:
+                prob = float((eom_means > thr).mean() * 100.0)
+                prob_data.append({"Threshold ($)": f"${thr:.2f}", "Probability (%)": f"{prob:.1f}%"})
+            prob_table = pd.DataFrame(prob_data)
+        else:
+            prob_table = pd.DataFrame(columns=["Threshold ($)", "Probability (%)"])
 
-    # Flat extension inside the *future* half of window: use last available forecast level
-    # Use median of simulated *next day onward* if available; else the last fitted value.
-    if paths.size>0:
-        last_forecast_level = float(np.median(paths, axis=0)[-1])
-    else:
-        last_forecast_level = float(pred_slice["pred"].iloc[-1]) if not pred_slice.empty else float(model_df["gas_price"].iloc[-1])
-
-    future_days = pd.date_range(today + pd.Timedelta(days=1), window_end, freq="D")
-    next_ext = pd.DataFrame({"date": future_days, "pred": np.full(len(future_days), last_forecast_level)})
-
-    out = dict(
-        ridge=ridge, metrics=metrics,
-        base=base, model_df=model_df,
-        mtd=mtd, mtd_avg=mtd_avg,
-        future_dates=future_dates, paths=paths, eom_means=eom_means,
-        eom_mean=eom_mean, ci5=ci5, ci95=ci95,
-        prob_table=prob_tbl, month_end=month_end,
-        pred_slice=pred_slice, actual_slice=actual_slice, next_ext=next_ext,
-        today=today
-    )
-    return out
+        return {
+            "future_dates": future_dates,
+            "paths": paths,
+            "mtd_avg": mtd_avg,
+            "eom_mean": eom_mean,
+            "ci5": ci5,
+            "ci95": ci95,
+            "metrics": metrics,
+            "prob_table": prob_table,
+            "thresholds": thresholds
+        }
+        
+    except Exception as e:
+        st.error(f"Modeling error: {str(e)}")
+        # Return a default structure with error information
+        return {
+            "future_dates": pd.DatetimeIndex([]),
+            "paths": np.array([]),
+            "mtd_avg": np.nan,
+            "eom_mean": np.nan,
+            "ci5": np.nan,
+            "ci95": np.nan,
+            "metrics": {"MAE": np.nan, "RMSE": np.nan, "R2": np.nan},
+            "prob_table": pd.DataFrame(columns=["Threshold ($)", "Probability (%)"], index=range(1)),
+            "thresholds": np.array([]),
+            "error": str(e)
+        }
 
 def nyc_now():
     return datetime.now(tz=ZoneInfo("America/New_York"))
@@ -968,26 +1004,42 @@ def main():
         
         # Calculate averages for GasBuddy
         gb_data = historical_data[historical_data['source'] == 'gasbuddy_fuel_insights'].copy()
-        gb_averages = calculate_averages(gb_data, 'GasBuddy')
         
-        # Create sleek table
-        avg_data = {
-            'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
-            'Average Price': [gb_averages['daily_avg'], gb_averages['mtd_avg'], gb_averages['wtd_avg']]
-        }
-        
-        df_gb = pd.DataFrame(avg_data)
-        st.dataframe(df_gb, use_container_width=True, hide_index=True)
+        # Debug: Check if we have data
+        if not gb_data.empty:
+            st.info(f"Found {len(gb_data)} GasBuddy records")
+            gb_averages = calculate_averages(gb_data, 'GasBuddy')
+            
+            # Create sleek table
+            avg_data = {
+                'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                'Average Price': [gb_averages['daily_avg'], gb_averages['mtd_avg'], gb_averages['wtd_avg']]
+            }
+            
+            df_gb = pd.DataFrame(avg_data)
+            st.dataframe(df_gb, use_container_width=True, hide_index=True)
+        else:
+            st.warning("No GasBuddy data found in database")
+            # Create empty table with placeholder data
+            avg_data = {
+                'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                'Average Price': ['No data', 'No data', 'No data']
+            }
+            df_gb = pd.DataFrame(avg_data)
+            st.dataframe(df_gb, use_container_width=True, hide_index=True)
         
         # Add CSV download button below the table
-        csv_data = create_chart_csv(gb_mtd, 'GasBuddy', 'price')
-        if csv_data:
-            st.download_button(
-                label="📥 Download CSV",
-                data=csv_data,
-                file_name=f"gasbuddy_mtd_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
-            )
+        if 'gb_mtd' in locals() and not gb_mtd.empty:
+            csv_data = create_chart_csv(gb_mtd, 'GasBuddy', 'price')
+            if csv_data:
+                st.download_button(
+                    label="📥 Download CSV",
+                    data=csv_data,
+                    file_name=f"gasbuddy_mtd_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
+        else:
+            st.info("No CSV data available for download")
         
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -1053,28 +1105,42 @@ def main():
         
         # Calculate averages for AAA
         aaa_data = historical_data[historical_data['source'] == 'aaa_gas_prices'].copy()
-        aaa_averages = calculate_averages(aaa_data, 'AAA')
         
-        # Create sleek table
-        avg_data = {
-            'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
-            'Average Price': [aaa_averages['daily_avg'], aaa_averages['mtd_avg'], aaa_averages['wtd_avg']]
-        }
-        
-        df_aaa = pd.DataFrame(avg_data)
-        st.dataframe(df_aaa, use_container_width=True, hide_index=True)
+        # Debug: Check if we have data
+        if not aaa_data.empty:
+            st.info(f"Found {len(aaa_data)} AAA records")
+            aaa_averages = calculate_averages(aaa_data, 'AAA')
+            
+            # Create sleek table
+            avg_data = {
+                'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                'Average Price': [aaa_averages['daily_avg'], aaa_averages['mtd_avg'], aaa_averages['wtd_avg']]
+            }
+            
+            df_aaa = pd.DataFrame(avg_data)
+            st.dataframe(df_aaa, use_container_width=True, hide_index=True)
+        else:
+            st.warning("No AAA data found in database")
+            # Create empty table with placeholder data
+            avg_data = {
+                'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                'Average Price': ['No data', 'No data', 'No data']
+            }
+            df_aaa = pd.DataFrame(avg_data)
+            st.dataframe(df_aaa, use_container_width=True, hide_index=True)
         
         # Add CSV download button below the table
-        csv_data = create_chart_csv(aaa_mtd, 'AAA', 'price')
-        if csv_data:
-            st.download_button(
-                label="📥 Download CSV",
-                data=csv_data,
-                file_name=f"aaa_daily_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
-            )
-        
-        st.markdown('</div>', unsafe_allow_html=True)
+        if 'aaa_mtd' in locals() and not aaa_mtd.empty:
+            csv_data = create_chart_csv(aaa_mtd, 'AAA', 'price')
+            if csv_data:
+                st.download_button(
+                    label="📥 Download CSV",
+                    data=csv_data,
+                    file_name=f"aaa_daily_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
+        else:
+            st.info("No CSV data available for download")
     
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1163,40 +1229,41 @@ def main():
         st.markdown('<h4>Crack Spread Averages</h4>', unsafe_allow_html=True)
         
         # Calculate averages for Crack Spread
-        try:
-            if 'crack_df' in locals() and not crack_df.empty:
-                # Create a temporary dataframe with the crack spread data for averaging
-                crack_data = crack_df[['date', 'Crack_Spread']].copy()
-                crack_data['scraped_at'] = pd.to_datetime(crack_data['date'])
-                crack_data['price'] = crack_data['Crack_Spread']  # Map to 'price' for the calculate_averages function
-                
-                # Calculate averages using the same function
-                crack_averages = calculate_averages(crack_data, 'Crack Spread')
-                
-                # Create sleek table
-                avg_data = {
-                    'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
-                    'Average Spread': [crack_averages['daily_avg'], crack_averages['mtd_avg'], crack_averages['wtd_avg']]
-                }
-                
-                df_crack = pd.DataFrame(avg_data)
-                st.dataframe(df_crack, use_container_width=True, hide_index=True)
-                
-                # Add CSV download button below the table
-                csv_data = create_chart_csv(crack_df, 'Crack Spread', 'crack_spread')
-                if csv_data:
-                    st.download_button(
-                        label="📥 Download CSV",
-                        data=csv_data,
-                        file_name=f"crack_spread_{datetime.now().strftime('%Y%m%d')}.csv",
-                        mime="text/csv"
-                    )
-            else:
-                st.warning("No crack spread data available for averages")
-        except Exception as e:
-            st.error(f"Error calculating crack spread averages: {e}")
+        if not crack_df.empty:
+            st.info(f"Found {len(crack_df)} Crack Spread records")
+            crack_data['price'] = crack_data['Crack_Spread']
+            crack_averages = calculate_averages(crack_data, 'Crack Spread')
+            
+            # Create sleek table
+            avg_data = {
+                'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                'Average Value': [crack_averages['daily_avg'], crack_averages['mtd_avg'], crack_averages['wtd_avg']]
+            }
+            
+            df_crack = pd.DataFrame(avg_data)
+            st.dataframe(df_crack, use_container_width=True, hide_index=True)
+        else:
+            st.warning("No Crack Spread data found in database")
+            # Create empty table with placeholder data
+            avg_data = {
+                'Period': ['Daily (EST)', 'Month-to-Date', 'Week-to-Date'],
+                'Average Value': ['No data', 'No data', 'No data']
+            }
+            df_crack = pd.DataFrame(avg_data)
+            st.dataframe(df_crack, use_container_width=True, hide_index=True)
         
-        st.markdown('</div>', unsafe_allow_html=True)
+        # Add CSV download button below the table
+        if not crack_df.empty:
+            csv_data = create_chart_csv(crack_df, 'Crack Spread', 'crack_spread')
+            if csv_data:
+                st.download_button(
+                    label="📥 Download CSV",
+                    data=csv_data,
+                    file_name=f"crack_spread_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
+        else:
+            st.info("No CSV data available for download")
     
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1207,8 +1274,44 @@ def main():
     st.header("Gas Price Forecasting & Modeling")
     
     try:
+        # Data validation before modeling
+        required_sources = ['gasbuddy_fuel_insights', 'marketwatch_rbob_futures', 'marketwatch_wti_futures']
+        available_sources = historical_data['source'].unique()
+        missing_sources = [src for src in required_sources if src not in available_sources]
+        
+        if missing_sources:
+            st.warning(f"⚠️ Missing required data sources for modeling: {', '.join(missing_sources)}")
+            st.info("The forecasting model requires data from GasBuddy, RBOB futures, and WTI futures sources.")
+            st.info("Please ensure your scraper has collected sufficient data from these sources.")
+            return
+        
+        # Check data volume
+        total_records = len(historical_data)
+        if total_records < 100:
+            st.warning(f"⚠️ Insufficient data for reliable modeling. Found {total_records} records, need at least 100.")
+            st.info("The model requires sufficient historical data to make accurate predictions.")
+            return
+        
+        # Check for recent data
+        latest_date = historical_data['scraped_at'].max()
+        if pd.isna(latest_date):
+            st.error("❌ No valid timestamps found in the data.")
+            return
+        
+        days_old = (datetime.now() - latest_date).days
+        if days_old > 7:
+            st.warning(f"⚠️ Data is {days_old} days old. For best results, ensure data is updated regularly.")
+        
+        st.success(f"✅ Data validation passed. Found {total_records} records from {len(available_sources)} sources.")
+        
         # Run the forecasting model
         res = fit_forecast_with_lags(historical_data, sim_n=2000, max_lag=14)
+        
+        # Check if modeling failed
+        if "error" in res:
+            st.error(f"❌ Modeling failed: {res['error']}")
+            st.info("This usually means insufficient data or data quality issues. Check the data requirements above.")
+            return
         
         # ---------- 1) MTD Fan Chart (3/5 width) + Threshold Probabilities (2/5 width) ----------
         st.markdown('<div class="chart-section">', unsafe_allow_html=True)
