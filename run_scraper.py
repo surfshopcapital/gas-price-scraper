@@ -121,6 +121,7 @@ def main():
                 if current_time - last_status_time > 300:  # 5 minutes
                     try:
                         print(f"🔄 Scheduler heartbeat @ {time.strftime('%Y-%m-%d %H:%M:%S')} - {len(schedule.get_jobs())} jobs registered")
+                        print(f"   🌍 All times shown in UTC (Railway timezone)")
                         
                         # Show next few scheduled jobs
                         next_jobs = schedule.get_jobs()

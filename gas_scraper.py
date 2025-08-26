@@ -898,9 +898,9 @@ class GasScraper:
         print("🚗 Hexa Source Gas Scraper (Playwright) — Scheduled Mode")
         print("=" * 50)
         print("• GasBuddy: every 10 min")
-        print("• AAA: daily 3:01 AM ET")
+        print("• AAA: daily 3:30 AM EST (7:30 UTC)")
         print("• RBOB & WTI: every hour Sun 6pm-Fri 8pm EST")
-        print("• EIA (TE pages): daily 15:35 UTC")
+        print("• EIA (TE pages): daily 10:35 AM EST (14:35 UTC)")
         print("• Daily Excel: 22:00 UTC")
         print("• Monthly Excel check: 22:00 UTC (run if day==1)")
         print("=" * 50)
@@ -908,22 +908,25 @@ class GasScraper:
         # Clear any existing jobs
         schedule.clear()
 
+        # NOTE: All times are in UTC (Railway runs in UTC)
+        # EST is UTC-5 (UTC-4 during daylight saving time)
+        
         # GasBuddy: every 10 minutes (changed from 15)
         try:
             schedule.every(10).minutes.do(self.run_gasbuddy_job)
         except Exception as e:
             print(f"⚠️ Error scheduling GasBuddy: {e}")
         
-        # AAA: daily at 3:01 AM ET
+        # AAA: daily at 3:30 AM EST (7:30 UTC)
         try:
-            schedule.every().day.at("03:01").do(self.run_aaa_job)
+            schedule.every().day.at("07:30").do(self.run_aaa_job)
         except Exception as e:
             print(f"⚠️ Error scheduling AAA: {e}")
         
-        # EIA (TE pages): daily at 15:35 UTC
+        # EIA (TE pages): daily at 10:35 AM EST (14:35 UTC)
         try:
-            schedule.every().day.at("15:35").do(self.run_gasoline_stocks_job)
-            schedule.every().day.at("15:35").do(self.run_refinery_runs_job)
+            schedule.every().day.at("14:35").do(self.run_gasoline_stocks_job)
+            schedule.every().day.at("14:35").do(self.run_refinery_runs_job)
         except Exception as e:
             print(f"⚠️ Error scheduling EIA pages: {e}")
         
