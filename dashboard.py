@@ -6,6 +6,10 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta, date
 import os
+import numpy as np
+from sklearn.linear_model import RidgeCV
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from zoneinfo import ZoneInfo
 
 # Page configuration
 st.set_page_config(
@@ -214,7 +218,7 @@ def get_next_update_info():
     }
 
 def create_chart_csv(chart_data, source_name, chart_type):
-    """Create CSV data for chart download"""
+    """Create CSV data for chart download with EST timestamps"""
     try:
         if chart_data.empty:
             return None
@@ -222,10 +226,12 @@ def create_chart_csv(chart_data, source_name, chart_type):
         # Prepare data for CSV
         if chart_type == 'crack_spread':
             csv_data = chart_data[['date', 'Crack_Spread']].copy()
-            csv_data.columns = ['Date', 'Crack_Spread_$']
+            csv_data.columns = ['Date (EST)', 'Crack_Spread_$']
         else:
             csv_data = chart_data[['scraped_at', 'price']].copy()
-            csv_data.columns = ['Timestamp', 'Price_$']
+            # Convert UTC timestamps to EST for CSV export
+            csv_data['scraped_at'] = pd.to_datetime(csv_data['scraped_at'], utc=True) - timedelta(hours=5)
+            csv_data.columns = ['Timestamp (EST)', 'Price_$']
         
         return csv_data.to_csv(index=False)
     except Exception as e:
@@ -312,6 +318,337 @@ def calculate_averages(data, source_name):
             'mtd_avg': 'Error',
             'wtd_avg': 'Error'
         }
+
+# ===================== Modeling Functions =====================
+def _daily_panel(historical_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build a clean daily panel from 'historical_data' (prod-like schema).
+    Uses sources:
+      - gasbuddy_fuel_insights (target)
+      - marketwatch_rbob_futures, marketwatch_wti_futures (drivers)
+      - tradingeconomics_gasoline_stocks (weekly surprise)
+      - tradingeconomics_refinery_runs (weekly level)
+    """
+    df = historical_data.copy()
+    df["scraped_at"] = pd.to_datetime(df["scraped_at"], errors="coerce")
+    df = df.dropna(subset=["scraped_at"])
+    # normalize to date (localize if naive)
+    if df["scraped_at"].dt.tz is None:
+        df["scraped_at"] = df["scraped_at"].dt.tz_localize("America/New_York")
+    df["date"] = pd.to_datetime(df["scraped_at"].dt.date)
+
+    def dmean(src, colname):
+        sub = df[df["source"]==src][["date","price"]]
+        if sub.empty:
+            return pd.DataFrame(columns=["date", colname])
+        return sub.groupby("date", as_index=False)["price"].mean().rename(columns={"price": colname})
+
+    gb   = dmean("gasbuddy_fuel_insights", "gas_price")
+    rbob = dmean("marketwatch_rbob_futures", "rbob")
+    wti  = dmean("marketwatch_wti_futures", "wti")
+
+    stocks = df[df["source"]=="tradingeconomics_gasoline_stocks"][["date","surprise"]].dropna().drop_duplicates("date")
+    ref    = df[df["source"]=="tradingeconomics_refinery_runs"][["date","price"]].dropna().drop_duplicates("date").rename(columns={"price":"refinery"})
+
+    starts = [x["date"].min() for x in [gb,rbob,wti] if not x.empty]
+    ends   = [x["date"].max() for x in [gb,rbob,wti] if not x.empty]
+    if not starts or not ends:
+        return pd.DataFrame(columns=["date","gas_price","rbob","wti","surprise","refinery","crack"])
+
+    start, end = min(starts), max(ends)
+    base = pd.DataFrame({"date": pd.date_range(start, end, freq="D")})
+
+    for d, col in [(gb,"gas_price"), (rbob,"rbob"), (wti,"wti")]:
+        if not d.empty:
+            base = base.merge(d[["date",col]], on="date", how="left")
+    base = base.merge(stocks, on="date", how="left")
+    base = base.merge(ref, on="date", how="left")
+
+    for c in ["rbob","wti","surprise","refinery"]:
+        if c in base.columns:
+            base[c] = base[c].ffill()
+
+    base["crack"] = base["rbob"] - (base["wti"]/42.0)
+    return base
+
+def _make_pulses(df: pd.DataFrame, decay=[1.0, 0.6, 0.36, 0.216]) -> pd.DataFrame:
+    """
+    Convert weekly levels into short-lived pulses centered on release day + geometric decay.
+    """
+    out = df.set_index("date").copy()
+    idx = out.index
+    for name in ["surprise","refinery"]:
+        if name not in out.columns:
+            out[name] = 0.0
+        series = out[name].fillna(0.0)
+        pulse = pd.Series(0.0, index=idx)
+        for i, w in enumerate(decay):
+            pulse = pulse.add(series.shift(i, fill_value=0.0)*w, fill_value=0.0)
+        out[f"{name}_pulse"] = pulse
+    return out.reset_index()
+
+def _add_lags(base: pd.DataFrame, max_lag: int = 14) -> pd.DataFrame:
+    """
+    Add daily lags and asymmetry on RBOB (up vs down).
+    """
+    df = base.copy()
+    for lag in range(0, max_lag+1):
+        df[f"rbob_l{lag}"]   = df["rbob"].shift(lag)
+        df[f"wti_l{lag}"]    = df["wti"].shift(lag)
+        df[f"crack_l{lag}"]  = df["crack"].shift(lag)
+
+    df["d_rbob"] = df["rbob"].diff()
+    df["rbob_up"]   = np.where(df["d_rbob"]>0,  df["rbob"], 0.0)
+    df["rbob_down"] = np.where(df["d_rbob"]<=0, df["rbob"], 0.0)
+    df["gas_lag1"]  = df["gas_price"].shift(1)
+    return df
+
+def fit_forecast_with_lags(historical_data: pd.DataFrame, sim_n: int = 2000, max_lag: int = 14):
+    base = _daily_panel(historical_data)
+    if base.empty:
+        raise ValueError("No usable daily panel; check inputs.")
+    base = _make_pulses(base)
+    base = _add_lags(base, max_lag=max_lag)
+
+    model_df = base.dropna(subset=["gas_price","gas_lag1"]).copy()
+
+    lag_cols = ([f"rbob_l{l}" for l in range(max_lag+1)] +
+                [f"wti_l{l}"  for l in range(max_lag+1)] +
+                [f"crack_l{l}" for l in range(max_lag+1)])
+    feat_cols = ["gas_lag1","rbob_up","rbob_down","surprise_pulse","refinery_pulse"] + lag_cols
+
+    X = model_df[feat_cols].copy()
+    y = model_df["gas_price"].copy()
+    X = X.fillna(method="ffill").fillna(method="bfill").fillna(X.mean())
+
+    # time-ordered 80/20 split
+    cut = int(len(model_df)*0.8) if len(model_df) >= 20 else max(1, int(len(model_df)*0.8))
+    X_train, X_test = X.iloc[:cut], X.iloc[cut:]
+    y_train, y_test = y.iloc[:cut], y.iloc[cut:]
+
+    ridge = RidgeCV(alphas=np.logspace(-4,3,21))
+    ridge.fit(X_train, y_train)
+
+    y_pred = ridge.predict(X_test) if len(X_test)>0 else np.array([])
+    metrics = {
+        "MAE": float(mean_absolute_error(y_test, y_pred)) if len(y_pred)>0 else np.nan,
+        "RMSE": float(mean_squared_error(y_test, y_pred, squared=False)) if len(y_pred)>0 else np.nan,
+        "R2": float(r2_score(y_test, y_pred)) if len(y_pred)>0 else np.nan,
+    }
+
+    # Month context
+    today = model_df["date"].max()
+    year, month = today.year, today.month
+    days_in_month = pd.Period(today, 'M').days_in_month
+    month_start = pd.Timestamp(year=year, month=month, day=1)
+    month_end   = pd.Timestamp(year=year, month=month, day=days_in_month)
+
+    mtd = model_df[(model_df["date"]>=month_start) & (model_df["date"]<=today)][["date","gas_price"]].sort_values("date")
+    mtd_avg = float(mtd["gas_price"].mean()) if not mtd.empty else np.nan
+    last_actual = mtd["date"].max() if not mtd.empty else (month_start - pd.Timedelta(days=1))
+
+    # Simulation set-up (flat exogenous; AR(1) via gas_lag1)
+    base_X = X.copy()
+    state_idx = base_X.index[base["date"]<=last_actual].max() if (base["date"]<=last_actual).any() else base_X.index.max()
+    state_vec = base_X.loc[state_idx].values
+    const_r = float(base.loc[state_idx, "rbob"])
+    const_w = float(base.loc[state_idx, "wti"])
+    const_c = float(base.loc[state_idx, "crack"])
+    col_index = {c:i for i,c in enumerate(base_X.columns)}
+    for l in range(max_lag+1):
+        if f"rbob_l{l}" in col_index:  state_vec[col_index[f"rbob_l{l}"]]  = const_r
+        if f"wti_l{l}"  in col_index:  state_vec[col_index[f"wti_l{l}"]]   = const_w
+        if f"crack_l{l}" in col_index: state_vec[col_index[f"crack_l{l}"]] = const_c
+    if "surprise_pulse" in col_index: state_vec[col_index["surprise_pulse"]] = 0.0
+    if "refinery_pulse" in col_index: state_vec[col_index["refinery_pulse"]] = 0.0
+    if "rbob_up" in col_index:   state_vec[col_index["rbob_up"]] = const_r
+    if "rbob_down" in col_index: state_vec[col_index["rbob_down"]] = 0.0
+
+    resid = (y_train.values - ridge.predict(X_train)) if len(X_train)>0 else np.array([0.0])
+
+    future_dates = pd.date_range(last_actual + pd.Timedelta(days=1), month_end, freq="D")
+    horizon = len(future_dates)
+    paths = np.zeros((sim_n, horizon), dtype=float) if horizon>0 else np.zeros((sim_n,0), dtype=float)
+
+    y0 = float(model_df.loc[model_df["date"]==last_actual, "gas_price"].iloc[0]) if (model_df["date"]==last_actual).any() else float(y_train.iloc[-1]) if len(y_train)>0 else float(y.iloc[-1])
+    idx_lag1 = col_index.get("gas_lag1", None)
+
+    for i in range(sim_n):
+        y_prev = y0
+        vec = state_vec.copy()
+        for h in range(horizon):
+            if idx_lag1 is not None:
+                vec[idx_lag1] = y_prev
+            y_hat = float(ridge.predict(vec.reshape(1,-1))[0])
+            eps = float(np.random.choice(resid)) if len(resid)>0 else 0.0
+            y_prev = y_hat + eps
+            paths[i,h] = y_prev
+
+    if horizon>0 and np.isfinite(mtd_avg):
+        mtd_days = mtd["date"].dt.date.nunique()
+        eom_means = (mtd_avg*mtd_days + paths.mean(axis=1)*horizon) / (mtd_days + horizon)
+    elif horizon==0 and np.isfinite(mtd_avg):
+        eom_means = np.full(sim_n, mtd_avg, dtype=float)
+    else:
+        eom_means = paths.mean(axis=1) if horizon>0 else np.array([])
+
+    eom_mean = float(np.mean(eom_means)) if len(eom_means) else np.nan
+    ci5, ci95 = (float(np.percentile(eom_means, 5)), float(np.percentile(eom_means, 95))) if len(eom_means) else (np.nan, np.nan)
+
+    # Thresholds: 6 values closest to current MTD avg at ±$0.05 steps
+    if np.isfinite(mtd_avg):
+        base_thr = np.round(mtd_avg, 2)
+        offsets = np.array([-0.05,-0.03,-0.01,0.01,0.03,0.05])
+        thr_vals = np.round(base_thr + offsets, 2)
+    else:
+        thr_vals = np.array([3.10,3.12,3.14,3.16,3.18,3.20])
+    prob_tbl = pd.DataFrame({
+        "Threshold ($/gal)": [f"{t:.2f}" for t in thr_vals],
+        "P(Month Avg > threshold)": [f"{(eom_means>t).mean():.1%}" if len(eom_means) else "—" for t in thr_vals]
+    })
+
+    # Pred vs Actual: ± two weeks window around "today"
+    window_start = today - pd.Timedelta(days=14)
+    window_end   = today + pd.Timedelta(days=14)
+    fit_all = ridge.predict(X)
+    fit_df = pd.DataFrame({"date": model_df["date"], "pred": fit_all})
+
+    pred_slice = fit_df[(fit_df["date"]>=window_start) & (fit_df["date"]<=today)]
+    actual_slice = model_df[(fit_df["date"]>=window_start) & (fit_df["date"]<=today)][["date","gas_price"]]
+
+    # Flat extension inside the *future* half of window: use last available forecast level
+    # Use median of simulated *next day onward* if available; else the last fitted value.
+    if paths.size>0:
+        last_forecast_level = float(np.median(paths, axis=0)[-1])
+    else:
+        last_forecast_level = float(pred_slice["pred"].iloc[-1]) if not pred_slice.empty else float(model_df["gas_price"].iloc[-1])
+
+    future_days = pd.date_range(today + pd.Timedelta(days=1), window_end, freq="D")
+    next_ext = pd.DataFrame({"date": future_days, "pred": np.full(len(future_days), last_forecast_level)})
+
+    out = dict(
+        ridge=ridge, metrics=metrics,
+        base=base, model_df=model_df,
+        mtd=mtd, mtd_avg=mtd_avg,
+        future_dates=future_dates, paths=paths, eom_means=eom_means,
+        eom_mean=eom_mean, ci5=ci5, ci95=ci95,
+        prob_table=prob_tbl, month_end=month_end,
+        pred_slice=pred_slice, actual_slice=actual_slice, next_ext=next_ext,
+        today=today
+    )
+    return out
+
+def nyc_now():
+    return datetime.now(tz=ZoneInfo("America/New_York"))
+
+def week_window(dt_nyc: datetime):
+    # Monday 12:00 ET → next Monday 12:00 ET
+    wd = dt_nyc.weekday()  # Monday=0
+    last_monday_noon = (dt_nyc - timedelta(days=wd)).replace(hour=12, minute=0, second=0, microsecond=0)
+    if dt_nyc < last_monday_noon:
+        last_monday_noon -= timedelta(days=7)
+    next_monday_noon = last_monday_noon + timedelta(days=7)
+    return last_monday_noon, next_monday_noon
+
+def weekly_live_probability_and_path(historical_data: pd.DataFrame, res: dict, thr: float, sims: int = 800):
+    """
+    (A) For snapshots within Mon 12:00 ET → next Mon 12:00 ET, compute P( AAA next Monday daily > thr ).
+    (B) Week-to-date daily series (Mon..next Mon): AAA actuals where available + median prediction remainder.
+    """
+    base      = res["base"]
+    model_df  = res["model_df"]
+    ridge     = res["ridge"]
+
+    # Model residuals for bootstrap
+    X_cols = [c for c in model_df.columns if c.startswith(("gas_lag1","rbob_up","rbob_down","surprise_pulse","refinery_pulse","rbob_l","wti_l","crack_l"))]
+    base_X_full = model_df[X_cols].fillna(method="ffill").fillna(method="bfill").fillna(model_df[X_cols].mean())
+    resid = (model_df["gas_price"] - ridge.predict(base_X_full)).values
+    resid = resid[~np.isnan(resid)]
+    if resid.size == 0:
+        resid = np.array([0.0])
+
+    # Weekly window
+    now_nyc = nyc_now()
+    wk_start, wk_end = week_window(now_nyc)
+    end_date = pd.Timestamp(wk_end.date())
+
+    # Snapshot times from raw data (use 6h granularity)
+    df = historical_data.copy()
+    df["scraped_at"] = pd.to_datetime(df["scraped_at"], errors="coerce")
+    df = df.dropna(subset=["scraped_at"])
+    snaps = df[(df["scraped_at"]>=wk_start) & (df["scraped_at"]<=wk_end)].copy()
+    if snaps.empty:
+        return (pd.DataFrame(columns=["ts","prob"]),
+                pd.DataFrame(columns=["date","price"]))
+
+    snaps["key"] = snaps["scraped_at"].dt.tz_convert("America/New_York").dt.floor("6H")
+    snaps = snaps.sort_values("scraped_at").groupby("key", as_index=False).last()
+
+    # Helper: simulate up to target_date from last actual <= snap_day
+    def simulate_to_date(snap_day: pd.Timestamp, target_date: pd.Timestamp, sims: int):
+        md_slice = model_df[model_df["date"]<=snap_day]
+        if md_slice.empty:
+            return None, None
+        last_actual = md_slice["date"].max()
+        state_row = model_df.loc[model_df["date"]<=last_actual].iloc[-1:].copy()
+        for c in ["surprise_pulse","refinery_pulse"]:
+            if c in state_row.columns:
+                state_row[c] = 0.0
+        vec0 = state_row[X_cols].fillna(method="ffill", axis=1).fillna(method="bfill", axis=1).values[0]
+        try:
+            idx_gas_lag1 = X_cols.index("gas_lag1")
+        except ValueError:
+            idx_gas_lag1 = None
+
+        future_days = pd.date_range(last_actual + pd.Timedelta(days=1), target_date, freq="D")
+        H = len(future_days)
+        paths = np.zeros((sims, H), dtype=float) if H>0 else np.zeros((sims,0), dtype=float)
+        y0 = float(md_slice.loc[md_slice["date"]==last_actual, "gas_price"].iloc[0])
+
+        for i in range(sims):
+            vec = vec0.copy()
+            y_prev = y0
+            for h in range(H):
+                if idx_gas_lag1 is not None:
+                    vec[idx_gas_lag1] = y_prev
+                y_hat = float(ridge.predict(vec.reshape(1,-1))[0])
+                eps   = float(np.random.choice(resid))
+                y_prev = y_hat + eps
+                paths[i, h] = y_prev
+        return future_days, paths
+
+    # (A) Live probability curve
+    points = []
+    last_future_days, last_paths = None, None
+    for _, r in snaps.iterrows():
+        snap_time = r["key"]
+        snap_day  = pd.Timestamp(snap_time.date())
+        fdays, pths = simulate_to_date(snap_day, end_date, sims=sims)
+        if pths is None:
+            continue
+        end_vals = pths[:,-1] if pths.shape[1] else np.array([])
+        prob = float((end_vals > thr).mean()*100.0) if end_vals.size>0 else float("nan")
+        points.append({"ts": snap_time, "prob": prob})
+        last_future_days, last_paths = fdays, pths
+    live_df = pd.DataFrame(points).sort_values("ts")
+
+    # (B) Week-to-date daily path (Mon..next Mon)
+    wk_start_day = pd.Timestamp(wk_start.date())
+    week_days = pd.date_range(wk_start_day, end_date, freq="D")
+    actuals = model_df[model_df["date"].isin(week_days)][["date","gas_price"]].copy()
+    if last_paths is not None and last_paths.size>0:
+        med_path = np.median(last_paths, axis=0)
+        pred_df = pd.DataFrame({"date": last_future_days, "price": med_path})
+    else:
+        pred_df = pd.DataFrame(columns=["date","price"])
+    week_path = pd.DataFrame({"date": week_days})
+    week_path = week_path.merge(actuals.rename(columns={"gas_price":"price"}), on="date", how="left")
+    if not pred_df.empty:
+        week_path = week_path.merge(pred_df, on="date", how="left", suffixes=("","_pred"))
+        week_path["price"] = week_path["price"].combine_first(week_path["price_pred"])
+        week_path = week_path.drop(columns=["price_pred"])
+
+    return live_df, week_path
 
 def main():
     st.markdown('<h1 class="main-header">Gas Price Dashboard</h1>', unsafe_allow_html=True)
@@ -559,8 +896,16 @@ def main():
 
     # Helper: safe datetime conversion with timezone handling
     def _to_datetime(series):
-        """Convert to datetime with proper timezone handling"""
-        out = pd.to_datetime(series, errors='coerce', utc=False)
+        """Convert to datetime with proper timezone handling and convert to EST"""
+        # First convert to datetime (assuming UTC from database)
+        out = pd.to_datetime(series, errors='coerce', utc=True)
+        
+        # Convert UTC to EST (UTC-5, or UTC-4 during daylight saving time)
+        # For simplicity, we'll use UTC-5 (Eastern Standard Time)
+        # You can adjust this to UTC-4 for daylight saving time if needed
+        est_offset = timedelta(hours=5)
+        out = out - est_offset
+        
         return out
 
     # ---------- 1) GasBuddy Month-to-Date Chart (3/5 width) + Table (2/5 width) ----------
@@ -593,11 +938,11 @@ def main():
                         name='GasBuddy Prices',
                         line=dict(color='#1f77b4', width=2),
                         marker=dict(size=6, color='#1f77b4'),
-                        hovertemplate='Time=%{x}<br>Price=$%{y:.3f}<extra></extra>'
+                        hovertemplate='Time (EST)=%{x}<br>Price=$%{y:.3f}<extra></extra>'
                     ))
                     
                     fig_gb.update_layout(
-                        xaxis_title="Date & Time",
+                        xaxis_title="Date & Time (EST)",
                         yaxis_title="Price ($/gal)",
                         height=450,
                         margin=dict(l=40, r=20, t=40, b=40),
@@ -678,11 +1023,11 @@ def main():
                         name='AAA Daily Prices',
                         line=dict(color='#ff7f0e', width=2),
                         marker=dict(size=8, color='#ff7f0e'),
-                        hovertemplate='Date=%{x}<br>AAA Price=$%{y:.3f}<extra></extra>'
+                        hovertemplate='Date (EST)=%{x}<br>AAA Price=$%{y:.3f}<extra></extra>'
                     ))
                     
                     fig_aaa.update_layout(
-                        xaxis_title="Date",
+                        xaxis_title="Date (EST)",
                         yaxis_title="Price ($/gal)",
                         height=450,
                         margin=dict(l=40, r=20, t=40, b=40),
@@ -783,7 +1128,7 @@ def main():
                             name='Crack Spread ($)',
                             line=dict(color='#9467bd', width=3),
                             marker=dict(size=8, color='#9467bd'),
-                            hovertemplate='Date=%{x}<br>Crack Spread=$%{y:.2f}<extra></extra>'
+                            hovertemplate='Date (EST)=%{x}<br>Crack Spread=$%{y:.2f}<extra></extra>'
                         ))
                         
                         # Add horizontal line at zero for reference
@@ -791,7 +1136,7 @@ def main():
                                           annotation_text="Break-even", annotation_position="bottom right")
                         
                         fig_crack.update_layout(
-                            xaxis_title="Date",
+                            xaxis_title="Date (EST)",
                             yaxis_title="Crack Spread ($)",
                             height=450,
                             margin=dict(l=40, r=20, t=40, b=40),
@@ -854,6 +1199,241 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown('</div>', unsafe_allow_html=True)
+
+    # ===========================
+    # 🧮 NEW MODELING SECTION
+    # ===========================
+    st.markdown("---")
+    st.header("Gas Price Forecasting & Modeling")
+    
+    try:
+        # Run the forecasting model
+        res = fit_forecast_with_lags(historical_data, sim_n=2000, max_lag=14)
+        
+        # ---------- 1) MTD Fan Chart (3/5 width) + Threshold Probabilities (2/5 width) ----------
+        st.markdown('<div class="chart-section">', unsafe_allow_html=True)
+        st.subheader("1. Month-to-Date Fan Chart with Threshold Probabilities")
+        
+        col1, col2 = st.columns([3, 2])
+        
+        with col1:
+            if len(res["future_dates"]) > 0 and res["paths"].shape[1] > 0:
+                pct = [5, 25, 50, 75, 95]
+                bands = {p: np.percentile(res["paths"], p, axis=0) for p in pct}
+                fig_fan = go.Figure()
+                
+                if not res["mtd"].empty:
+                    fig_fan.add_trace(go.Scatter(
+                        x=res["mtd"]["date"], 
+                        y=res["mtd"]["gas_price"],
+                        mode="lines", 
+                        name="Actual (MTD)",
+                        line=dict(color='#1f77b4', width=3)
+                    ))
+                
+                fig_fan.add_trace(go.Scatter(
+                    x=res["future_dates"], 
+                    y=bands[50], 
+                    mode="lines", 
+                    name="Median Forecast",
+                    line=dict(color='#ff7f0e', width=3)
+                ))
+                
+                fig_fan.add_trace(go.Scatter(
+                    x=np.concatenate([res["future_dates"], res["future_dates"][::-1]]),
+                    y=np.concatenate([bands[75], bands[25][::-1]]),
+                    fill="toself", 
+                    name="50% Confidence Band", 
+                    opacity=0.3, 
+                    line=dict(width=0),
+                    fillcolor='rgba(255, 127, 14, 0.3)'
+                ))
+                
+                fig_fan.add_trace(go.Scatter(
+                    x=np.concatenate([res["future_dates"], res["future_dates"][::-1]]),
+                    y=np.concatenate([bands[95], bands[5][::-1]]),
+                    fill="toself", 
+                    name="90% Confidence Band", 
+                    opacity=0.2, 
+                    line=dict(width=0),
+                    fillcolor='rgba(255, 127, 14, 0.2)'
+                ))
+                
+                fig_fan.update_layout(
+                    title=f"Month-to-Date Fan Chart → {res['month_end'].date()}",
+                    xaxis_title="Date (EST)",
+                    yaxis_title="Price ($/gal)",
+                    height=450,
+                    margin=dict(l=40, r=20, t=40, b=40),
+                    hovermode='x unified',
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+                )
+                
+                st.plotly_chart(fig_fan, use_container_width=True)
+                
+                st.info("📊 **Fan Chart**: Shows actual month-to-date prices with forecasted ranges. The bands represent confidence intervals for the remainder of the month.")
+            else:
+                st.info("No remaining days in the current month to forecast.")
+        
+        with col2:
+            st.markdown('<div class="data-table">', unsafe_allow_html=True)
+            st.markdown('<h4>Threshold Probabilities</h4>', unsafe_allow_html=True)
+            st.markdown('<p style="font-size: 0.9rem; color: #666;">P(Month Avg > threshold) ±$0.05 around current MTD avg</p>', unsafe_allow_html=True)
+            
+            # Display threshold probabilities table
+            st.dataframe(res["prob_table"], use_container_width=True, hide_index=True)
+            
+            # Display EOM statistics
+            if not np.isnan(res['eom_mean']):
+                st.markdown(f"**End-of-Month Forecast:**")
+                st.markdown(f"**Mean:** ${res['eom_mean']:.3f}")
+                st.markdown(f"**90% CI:** [{res['ci5']:.3f}, {res['ci95']:.3f}]")
+            
+            # Display model metrics
+            if not np.isnan(res['metrics']['MAE']):
+                st.markdown(f"**Model Performance (80/20 split):**")
+                st.markdown(f"**MAE:** {res['metrics']['MAE']:.4f}")
+                st.markdown(f"**RMSE:** {res['metrics']['RMSE']:.4f}")
+                st.markdown(f"**R²:** {res['metrics']['R2']:.3f}")
+            else:
+                st.markdown("_Insufficient history for reliable out-of-sample validation._")
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # ---------- 2) Predicted vs Actual Chart (±2 weeks around today) ----------
+        st.markdown('<div class="chart-section">', unsafe_allow_html=True)
+        st.subheader("2. Predicted vs Actual — ±2 Weeks Around Today")
+        
+        fig_pa = go.Figure()
+        
+        if not res["actual_slice"].empty:
+            fig_pa.add_trace(go.Scatter(
+                x=res["actual_slice"]["date"], 
+                y=res["actual_slice"]["gas_price"],
+                mode="lines+markers", 
+                name="Actual",
+                line=dict(color='#1f77b4', width=3),
+                marker=dict(size=6, color='#1f77b4')
+            ))
+        
+        if not res["pred_slice"].empty:
+            fig_pa.add_trace(go.Scatter(
+                x=res["pred_slice"]["date"], 
+                y=res["pred_slice"]["pred"],
+                mode="lines", 
+                name="Model (Fitted)",
+                line=dict(color='#ff7f0e', width=2, dash='dot')
+            ))
+        
+        if not res["next_ext"].empty:
+            fig_pa.add_trace(go.Scatter(
+                x=res["next_ext"]["date"], 
+                y=res["next_ext"]["pred"],
+                mode="lines", 
+                name="Flat Extension (Forecast)",
+                line=dict(color='#9467bd', width=2, dash='dash')
+            ))
+        
+        # Fix window explicitly to ± 14 days
+        win_start = res["today"] - pd.Timedelta(days=14)
+        win_end = res["today"] + pd.Timedelta(days=14)
+        
+        fig_pa.update_layout(
+            title="Model Performance & Forecast Extension",
+            xaxis=dict(title="Date (EST)", range=[win_start, win_end]),
+            yaxis_title="Price ($/gal)",
+            height=450,
+            margin=dict(l=40, r=20, t=40, b=40),
+            hovermode='x unified',
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+        )
+        
+        st.plotly_chart(fig_pa, use_container_width=True)
+        
+        st.info("🔍 **Predicted vs Actual**: Shows how well the model fits historical data and extends forecasts into the future with a flat extension based on the latest forecast level.")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # ---------- 3) Weekly Live Probability & WTD Path ----------
+        st.markdown('<div class="chart-section">', unsafe_allow_html=True)
+        st.subheader("3. Weekly Live View (Mon 12:00 ET → Next Mon 12:00 ET)")
+        
+        # User input for threshold
+        thr_val = st.number_input(
+            "Threshold ($/gal): Probability that next Monday's AAA national daily value (12:00 ET) is strictly greater than…",
+            min_value=0.00, 
+            max_value=10.00, 
+            value=3.15, 
+            step=0.01, 
+            format="%.2f"
+        )
+        
+        live_df, week_path = weekly_live_probability_and_path(historical_data, res, thr=float(thr_val), sims=800)
+        
+        if live_df.empty and week_path.empty:
+            st.info("No data in the current weekly window yet.")
+        else:
+            wk_start, wk_end = week_window(nyc_now())
+            
+            # Put week_path daily points at noon ET for the combined time axis
+            if not week_path.empty:
+                week_path = week_path.copy()
+                week_path["ts_noon"] = pd.to_datetime(week_path["date"]).apply(
+                    lambda d: datetime(d.year, d.month, d.day, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+                )
+            
+            fig_live = go.Figure()
+            
+            # A: Probability line (left axis)
+            if not live_df.empty:
+                fig_live.add_trace(
+                    go.Scatter(
+                        x=live_df["ts"], 
+                        y=live_df["prob"],
+                        mode="lines+markers", 
+                        name=f"P(Next Mon > ${thr_val:.2f})", 
+                        yaxis="y1",
+                        line=dict(color='#1f77b4', width=3),
+                        marker=dict(size=6, color='#1f77b4')
+                    )
+                )
+            
+            # B: WTD AAA path (right axis)
+            if not week_path.empty:
+                fig_live.add_trace(
+                    go.Scatter(
+                        x=week_path["ts_noon"], 
+                        y=week_path["price"],
+                        mode="lines+markers", 
+                        name="AAA WTD (actuals + predicted)", 
+                        yaxis="y2", 
+                        line=dict(dash="dot", color='#ff7f0e', width=2),
+                        marker=dict(size=6, color='#ff7f0e')
+                    )
+                )
+            
+            fig_live.update_layout(
+                title="Weekly Live: Probability to Next Monday & AAA Week-to-Date Path",
+                xaxis=dict(title="Time (ET)", range=[wk_start, wk_end]),
+                yaxis=dict(title="Probability (%)", range=[0, 100]),
+                yaxis2=dict(title="$/gal", overlaying="y", side="right"),
+                height=450,
+                margin=dict(l=40, r=20, t=40, b=40),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+            )
+            
+            st.plotly_chart(fig_live, use_container_width=True)
+            
+            st.info("📈 **Weekly Live**: Shows the live probability that next Monday's AAA price will exceed your threshold, combined with the week-to-date path combining actual AAA data and median predictions.")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+    except Exception as e:
+        st.error(f"Modeling failed: {e}")
+        st.exception(e)
+        st.info("The forecasting model requires sufficient historical data from multiple sources (GasBuddy, RBOB, WTI, Gasoline Stocks, Refinery Runs). Please ensure you have at least 30 days of data from these sources.")
 
     # Footer
     st.markdown("---")
