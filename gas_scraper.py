@@ -4,9 +4,10 @@ import random
 import schedule
 import psycopg2
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from zoneinfo import ZoneInfo
 
 US_CITIES = [
     {"name": "New York", "lat": 40.7128, "lng": -74.0060},
@@ -128,6 +129,10 @@ class GasScraper:
                 cur.execute("ALTER TABLE gas_prices ADD COLUMN IF NOT EXISTS surprise double precision;")
             except Exception:
                 pass
+            try:
+                cur.execute("ALTER TABLE gas_prices ADD COLUMN IF NOT EXISTS as_of_date date;")
+            except Exception:
+                pass
             conn.commit()
             cur.close()
             conn.close()
@@ -163,9 +168,9 @@ class GasScraper:
                 cur.execute(
                     """
                     INSERT INTO gas_prices
-                      (price, timestamp, region, source, fuel_type, consensus, surprise, scraped_at)
+                      (price, timestamp, region, source, fuel_type, consensus, surprise, as_of_date, scraped_at)
                     VALUES
-                      (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                      (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                     """,
                     (
                         r.get("price"),
@@ -175,6 +180,7 @@ class GasScraper:
                         r.get("fuel_type"),
                         r.get("consensus"),
                         r.get("surprise"),
+                        r.get("as_of_date"),   # <<< NEW (None for non-AAA is fine)
                     ),
                 )
                 saved += 1
@@ -195,9 +201,9 @@ class GasScraper:
                     cur.execute(
                         """
                         INSERT INTO gas_prices
-                          (price, timestamp, region, source, fuel_type, consensus, surprise, scraped_at)
+                          (price, timestamp, region, source, fuel_type, consensus, surprise, as_of_date, scraped_at)
                         VALUES
-                          (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                          (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                         """,
                         (
                             r.get("price"),
@@ -207,6 +213,7 @@ class GasScraper:
                             r.get("fuel_type"),
                             r.get("consensus"),
                             r.get("surprise"),
+                            r.get("as_of_date"),   # <<< NEW (None for non-AAA is fine)
                         ),
                     )
                     saved += 1
@@ -218,6 +225,63 @@ class GasScraper:
             except Exception as retry_e:
                 print(f"❌ Retry also failed: {retry_e}")
                 return False
+
+    # --- SANITY FILTERS -------------------------------------------------
+    def _get_last_price(self, source: str):
+        try:
+            conn = psycopg2.connect(self.database_url)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT price FROM gas_prices
+                WHERE source=%s
+                ORDER BY scraped_at DESC
+                LIMIT 1
+            """, (source,))
+            row = cur.fetchone()
+            cur.close(); conn.close()
+            return float(row[0]) if row else None
+        except Exception:
+            return None
+
+    def _get_price_approx_one_week_ago(self, source: str):
+        """Most recent price at/just before ~7 days ago."""
+        try:
+            conn = psycopg2.connect(self.database_url)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT price FROM gas_prices
+                WHERE source=%s AND scraped_at <= (CURRENT_TIMESTAMP - INTERVAL '7 days')
+                ORDER BY scraped_at DESC
+                LIMIT 1
+            """, (source,))
+            row = cur.fetchone()
+            cur.close(); conn.close()
+            return float(row[0]) if row else None
+        except Exception:
+            return None
+
+    def _is_plausible_change(self, source: str, new_price: float, limit: float = 0.50) -> bool:
+        """
+        Returns True if the new price is plausible. Reject when absolute pct-change
+        vs last and/or ~1-week-ago exceeds 50%.
+        """
+        def _pct_jump(prev):
+            if prev is None: 
+                return 0.0
+            if prev == 0:
+                return 0.0
+            return abs((new_price - prev) / prev)
+
+        last = self._get_last_price(source)
+        last_week = self._get_price_approx_one_week_ago(source)
+
+        if _pct_jump(last) > limit:
+            print(f"⚠️ Sanity filter: {source} jumped {100*_pct_jump(last):.1f}% vs last ({last}); ignoring scrape.")
+            return False
+        if _pct_jump(last_week) > limit:
+            print(f"⚠️ Sanity filter: {source} jumped {100*_pct_jump(last_week):.1f}% vs ~1 week ago ({last_week}); ignoring scrape.")
+            return False
+        return True
 
     # ---------------------------
     # Navigation helper (retry)
@@ -334,14 +398,17 @@ class GasScraper:
 
             try:
                 current_float = float(current_price)
+                nyc_now = datetime.now(tz=ZoneInfo("America/New_York"))
+                as_of = (nyc_now.date() - timedelta(days=1))  # the day the AAA value represents
                 out = {
                     "price": current_float,
-                    "timestamp": f"Current as of {datetime.now().strftime('%Y-%m-%d')}",
+                    "timestamp": f"Current as of {nyc_now.strftime('%Y-%m-%d')}",
                     "region": "United States",
                     "source": "aaa_gas_prices",
                     "fuel_type": "regular",
+                    "as_of_date": as_of,   # <<< NEW
                 }
-                print(f"   ✅ AAA {current_float}")
+                print(f"   ✅ AAA {current_float} (as_of={as_of})")
                 return out
             except Exception as e:
                 print(f"   ❌ AAA parse error: {e}")
@@ -670,34 +737,34 @@ class GasScraper:
     def run_gasbuddy_job(self):
         print(f"\n--- GasBuddy job @ {now_ts()} ---")
         data = self.scrape_gasbuddy()
-        if data:
+        if data and self._is_plausible_change("gasbuddy_fuel_insights", data["price"]):
             self.save_to_database(data)
         else:
-            print("❌ GasBuddy scrape failed")
+            print("❌ GasBuddy scrape failed or rejected by sanity filter")
 
     def run_aaa_job(self):
         print(f"\n--- AAA job @ {now_ts()} ---")
         data = self.scrape_aaa()
-        if data:
+        if data and self._is_plausible_change("aaa_gas_prices", data["price"]):
             self.save_to_database(data)
         else:
-            print("❌ AAA scrape failed")
+            print("❌ AAA scrape failed or rejected by sanity filter")
 
     def run_rbob_job(self):
         print(f"\n--- RBOB job @ {now_ts()} ---")
         data = self.scrape_rbob()
-        if data:
+        if data and self._is_plausible_change("marketwatch_rbob_futures", data["price"]):
             self.save_to_database(data)
         else:
-            print("❌ RBOB scrape failed")
+            print("❌ RBOB scrape failed or rejected by sanity filter")
 
     def run_wti_job(self):
         print(f"\n--- WTI job @ {now_ts()} ---")
         data = self.scrape_wti()
-        if data:
+        if data and self._is_plausible_change("marketwatch_wti_futures", data["price"]):
             self.save_to_database(data)
         else:
-            print("❌ WTI scrape failed")
+            print("❌ WTI scrape failed or rejected by sanity filter")
 
     def run_gasoline_stocks_job(self):
         print(f"\n--- TE Gasoline Stocks job @ {now_ts()} ---")
@@ -900,7 +967,7 @@ class GasScraper:
         print("• GasBuddy: every 10 min")
         print("• AAA: daily 3:30 AM EST (7:30 UTC)")
         print("• RBOB & WTI: every hour Sun 6pm-Fri 8pm EST")
-        print("• EIA (TE pages): daily 10:35 AM EST (14:35 UTC)")
+        print("• EIA (TE pages): daily 11:00, 12:00, 13:00, 17:00 EST (16:00, 17:00, 18:00, 22:00 UTC)")
         print("• Daily Excel: 22:00 UTC")
         print("• Monthly Excel check: 22:00 UTC (run if day==1)")
         print("=" * 50)
@@ -923,12 +990,14 @@ class GasScraper:
         except Exception as e:
             print(f"⚠️ Error scheduling AAA: {e}")
         
-        # EIA (TE pages): daily at 10:35 AM EST (14:35 UTC)
+        # TE pages (was 10:35 EST). New times: 11:00, 12:00, 13:00, 17:00 EST
+        # → 16:00, 17:00, 18:00, 22:00 UTC
         try:
-            schedule.every().day.at("14:35").do(self.run_gasoline_stocks_job)
-            schedule.every().day.at("14:35").do(self.run_refinery_runs_job)
+            for t in ("16:00", "17:00", "18:00", "22:00"):
+                schedule.every().day.at(t).do(self.run_gasoline_stocks_job)
+                schedule.every().day.at(t).do(self.run_refinery_runs_job)
         except Exception as e:
-            print(f"⚠️ Error scheduling EIA pages: {e}")
+            print(f"⚠️ Error scheduling TE pages: {e}")
         
         # Daily Excel: 22:00 UTC
         try:
