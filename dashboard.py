@@ -487,6 +487,8 @@ def main():
 
     # -------- Top row: 3 charts --------
     c1, c2, c3 = st.columns(3)
+
+    # GasBuddy MTD + top-right latest value
     with c1:
         st.subheader("GasBuddy (Month-to-Date)")
         gb = historical_data[historical_data['source']=='gasbuddy_fuel_insights'].copy()
@@ -495,18 +497,26 @@ def main():
             today_dt = datetime.now()
             month_start = today_dt.replace(day=1).date()
             gb['date'] = gb['scraped_at'].dt.date
-            gb_mtd = gb[(gb['date']>=month_start) & (gb['date']<=today_dt.date())]
+            gb_mtd = gb[(gb['date']>=month_start) & (gb['date']<=today_dt.date())].sort_values('scraped_at')
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=gb_mtd['scraped_at'], y=gb_mtd['price'],
                                      mode='lines+markers', name='GasBuddy',
                                      hovertemplate='Time (EST)=%{x}<br>Price=$%{y:.3f}<extra></extra>'))
-            fig.update_layout(xaxis_title="Date & Time (EST)", yaxis_title="Price ($/gal)", height=340,
-                              margin=dict(l=40,r=20,t=40,b=40), hovermode='x unified',
+            # Add latest value label in top-right
+            if len(gb_mtd) > 0:
+                last_val = gb_mtd['price'].iloc[-1]
+                fig.add_annotation(x=1, y=1, xref="paper", yref="paper",
+                                   xanchor="right", yanchor="top", showarrow=False,
+                                   text=f"<b>${last_val:.3f}</b>")
+            fig.update_layout(xaxis_title="Date & Time (EST)", yaxis_title="Price ($/gal)",
+                              height=340, margin=dict(l=40,r=20,t=40,b=40),
+                              hovermode='x unified',
                               legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No GasBuddy data available")
 
+    # AAA MTD + top-right latest value
     with c2:
         st.subheader("AAA Daily Gas Prices")
         aaa = historical_data[historical_data['source']=='aaa_gas_prices'].copy()
@@ -516,11 +526,17 @@ def main():
             month_start = today_dt.replace(day=1).date()
             # Since as_of_date column doesn't exist yet, use scraped_at
             aaa['date'] = (aaa['scraped_at'] - timedelta(days=1)).dt.date
-            aaa_mtd = aaa[(aaa['date']>=month_start) & (aaa['date']<=today_dt.date())]
+            aaa_mtd = aaa[(aaa['date']>=month_start) & (aaa['date']<=today_dt.date())].sort_values('scraped_at')
             fig_aaa = go.Figure()
             fig_aaa.add_trace(go.Scatter(x=aaa_mtd['scraped_at'], y=aaa_mtd['price'],
                                          mode='lines+markers', name='AAA',
                                          hovertemplate='Date (EST)=%{x}<br>AAA=$%{y:.3f}<extra></extra>'))
+            # Add latest value label in top-right
+            if len(aaa_mtd) > 0:
+                last_val = aaa_mtd['price'].iloc[-1]
+                fig_aaa.add_annotation(x=1, y=1, xref="paper", yref="paper",
+                                       xanchor="right", yanchor="top", showarrow=False,
+                                       text=f"<b>${last_val:.3f}</b>")
             fig_aaa.update_layout(xaxis_title="Date (EST)", yaxis_title="Price ($/gal)", height=340,
                                    margin=dict(l=40,r=20,t=40,b=40), hovermode='x unified',
                                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
@@ -528,6 +544,7 @@ def main():
         else:
             st.info("No AAA data available")
 
+    # Crack Spread + top-right latest value
     with c3:
         st.subheader("Crack Spread (Last 30 Days)")
         rbob = historical_data[historical_data['source']=='marketwatch_rbob_futures'].copy()
@@ -549,6 +566,12 @@ def main():
                                         mode='lines+markers', name='Crack Spread ($)'))
             fig_cs.add_hline(y=0, line_dash="dash", line_color="gray",
                              annotation_text="Break-even", annotation_position="bottom right")
+            # Add latest value label in top-right
+            if len(crack_df) > 0:
+                last_val = crack_df['Crack_Spread'].iloc[-1]
+                fig_cs.add_annotation(x=1, y=1, xref="paper", yref="paper",
+                                      xanchor="right", yanchor="top", showarrow=False,
+                                      text=f"<b>${last_val:.2f}</b>")
             # >>> auto-fit Y axis
             fig_cs.update_yaxes(autorange=True)
             fig_cs.update_layout(xaxis_title="Date (EST)", yaxis_title="Crack Spread ($)", height=340,
@@ -580,6 +603,75 @@ def main():
                                        'Average Value':['No data','No data','No data']}),
                          use_container_width=True, hide_index=True)
 
+    # -------- NEW: RBOB / WTI last 7 days + summary table --------
+    st.subheader("Futures (Last 7 Days)")
+    f1, f2 = st.columns(2)
+    cutoff = datetime.now(tz=ZoneInfo("America/New_York")) - timedelta(days=7)
+
+    with f1:
+        rb = historical_data[historical_data['source']=='marketwatch_rbob_futures'].copy()
+        if not rb.empty:
+            rb['scraped_at'] = to_est(rb['scraped_at'])
+            rb7 = rb[rb['scraped_at']>=cutoff]
+            fig_rb = go.Figure()
+            fig_rb.add_trace(go.Scatter(x=rb7['scraped_at'], y=rb7['price'],
+                                        mode='lines+markers', name='RBOB'))
+            fig_rb.update_layout(title="RBOB Futures – 7D", xaxis_title="Time (EST)", yaxis_title="Price",
+                                 height=320, margin=dict(l=40,r=20,t=40,b=40), hovermode='x unified')
+            st.plotly_chart(fig_rb, use_container_width=True)
+        else:
+            st.info("No RBOB data")
+
+    with f2:
+        wt = historical_data[historical_data['source']=='marketwatch_wti_futures'].copy()
+        if not wt.empty:
+            wt['scraped_at'] = to_est(wt['scraped_at'])
+            wt7 = wt[wt['scraped_at']>=cutoff]
+            fig_wt = go.Figure()
+            fig_wt.add_trace(go.Scatter(x=wt7['scraped_at'], y=wt7['price'],
+                                        mode='lines+markers', name='WTI'))
+            fig_wt.update_layout(title="WTI Futures – 7D", xaxis_title="Time (EST)", yaxis_title="Price",
+                                 height=320, margin=dict(l=40,r=20,t=40,b=40), hovermode='x unified')
+            st.plotly_chart(fig_wt, use_container_width=True)
+        else:
+            st.info("No WTI data")
+
+    # Summary table below the two futures charts
+    def _latest_for(source, value_field="price"):
+        df = latest_data[latest_data["source"]==source]
+        if df.empty:
+            df = historical_data[historical_data["source"]==source]
+        if df.empty:
+            return np.nan, pd.NaT
+        row = df.sort_values("scraped_at").iloc[-1]
+        val = row[value_field] if (value_field in row and pd.notna(row[value_field])) else row.get("price", np.nan)
+        ts  = row["scraped_at"]
+        try:
+            ts_est = pd.to_datetime(ts, utc=True).tz_convert("America/New_York")
+        except Exception:
+            ts_est = pd.to_datetime(ts).tz_localize("UTC").tz_convert("America/New_York")
+        return val, ts_est
+
+    rows = []
+    for desc, src, fld, is_money in [
+        ("GasBuddy", "gasbuddy_fuel_insights", "price", True),
+        ("AAA", "aaa_gas_prices", "price", True),
+        ("RBOB Future", "marketwatch_rbob_futures", "price", True),
+        ("WTI", "marketwatch_wti_futures", "price", True),
+        ("Gasoline Stocks Change Surprise", "tradingeconomics_gasoline_stocks", "surprise", False),
+        ("Refinery Runs", "tradingeconomics_refinery_runs", "price", False),
+    ]:
+        val, ts = _latest_for(src, fld)
+        if is_money and pd.notna(val):
+            lv = f"${float(val):.3f}"
+        elif pd.notna(val):
+            lv = f"{float(val):.3f}"
+        else:
+            lv = "—"
+        ts_str = ts.strftime("%Y-%m-%d %H:%M %Z") if pd.notna(ts) else "—"
+        rows.append({"Description": desc, "Last Value": lv, "Timestamp": ts_str})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
     # ============== MODELING ==============
     st.markdown("---")
     st.header("Gas Price Forecasting & Modeling")
@@ -600,11 +692,14 @@ def main():
     k1,k2,k3,k4 = st.columns(4)
     with k1: st.metric("Records in database", value=f"{len(historical_data):,}")
     with k2:
-        gb_today = historical_data[historical_data['source']=='gasbuddy_fuel_insights'].copy()
-        gb_today['scraped_at'] = to_est(gb_today['scraped_at'])
-        gb_today['date'] = gb_today['scraped_at'].dt.date
-        val = gb_today.loc[gb_today['date']==datetime.now().date(),'price'].mean()
-        st.metric("Current daily retail (GasBuddy)", value=("—" if pd.isna(val) else f"${val:.3f}"))
+        gb_last = latest_data[latest_data["source"]=="gasbuddy_fuel_insights"]
+        if gb_last.empty:
+            gb_last = historical_data[historical_data["source"]=="gasbuddy_fuel_insights"]
+        if gb_last.empty:
+            val = np.nan
+        else:
+            val = float(gb_last.sort_values("scraped_at").iloc[-1]["price"])
+        st.metric("Current daily retail (GasBuddy, latest scrape)", value=("—" if pd.isna(val) else f"${val:.3f}"))
     with k3:
         p = res["weekly_prob_higher"]
         pred_next_mon = res["weekly_next_mon_pred"]
