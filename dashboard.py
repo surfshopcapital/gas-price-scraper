@@ -124,6 +124,147 @@ def make_threshold_table(eom_samples: np.ndarray, center: float) -> pd.DataFrame
              "Probability (%)": f"{(eom_samples > t).mean()*100:.1f}%"} for t in thresholds]
     return pd.DataFrame(rows)
 
+# >>> REPLACE the two helpers with this improved pair
+
+def _simple_beta_fit_and_predict(h: pd.DataFrame, k: int = 7, lookback_days: int = 120):
+    """
+    Fits Retail_t = alpha + b1*(RB_{t-k}*42) + b2*WTI_{t-k} on a recent window.
+    Uses AAA 'as-of-yesterday' first, then GasBuddy daily mean as fallback.
+
+    Returns:
+      last7_df:  last 7 days of actuals (AAA→GB)
+      future_dates: next 7 daily dates
+      preds: next 7-day point forecasts
+      betas: (alpha, b1, b2)
+      fit_used: DataFrame actually used in the OLS fit (for residuals)
+      base: daily panel used to source lags & actuals
+    """
+    base = _daily_panel(h)  # AAA-first fallback, ET daily calendar
+    if base.empty or base[["rbob", "wti", "gas_price"]].dropna().empty:
+        return None, None, None, None, None, None
+
+    base = base.sort_values("date").copy()
+    base["rb42"] = base["rbob"] * 42.0
+    base["rb42_lag"] = base["rb42"].shift(k)
+    base["wti_lag"]  = base["wti"].shift(k)
+
+    fit = base.dropna(subset=["gas_price", "rb42_lag", "wti_lag"]).copy()
+    if fit.empty:
+        return None, None, None, None, None, None
+
+    # regime-aware lookback; fall back to all if too short
+    cutoff = base["date"].max() - pd.Timedelta(days=lookback_days)
+    fit_recent = fit[fit["date"] >= cutoff]
+    use = fit_recent if len(fit_recent) >= 25 else fit
+
+    X = np.column_stack([np.ones(len(use)), use["rb42_lag"].values, use["wti_lag"].values])
+    y = use["gas_price"].values
+    alpha, b1, b2 = np.linalg.lstsq(X, y, rcond=None)[0]
+
+    # Previous 7 days of actuals
+    last7_df = base.tail(7)[["date", "gas_price"]].copy()
+
+    # Next 7 days predictions (use RB/WTI from t-k; fall back to latest if gap)
+    start_date   = base["date"].max() + pd.Timedelta(days=1)
+    future_dates = pd.date_range(start_date, periods=7, freq="D")
+    preds = []
+    for d in future_dates:
+        ref = d - pd.Timedelta(days=k)
+        row = base.loc[base["date"] == ref, ["rbob", "wti"]]
+        if row.empty:
+            rb = float(base["rbob"].dropna().iloc[-1])
+            wt = float(base["wti"].dropna().iloc[-1])
+        else:
+            rb = float(row["rbob"].iloc[0])
+            wt = float(row["wti"].iloc[0])
+        preds.append(alpha + b1*(rb*42.0) + b2*wt)
+
+    return last7_df, future_dates, np.array(preds), (float(alpha), float(b1), float(b2)), use[["rb42_lag","wti_lag","gas_price"]].copy(), base
+
+
+def _render_simple_beta_block(h: pd.DataFrame, k: int = 7, lookback_days: int = 120, sim_n: int = 5000):
+    last7, fdates, preds, betas, fit_used, base = _simple_beta_fit_and_predict(h, k=k, lookback_days=lookback_days)
+    if last7 is None:
+        st.info("Simple beta model: not enough data yet to fit.")
+        return
+
+    alpha, b1, b2 = betas
+
+    # ===== Chart: last 7 actuals + next 7 forecasts (values labeled) =====
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=last7["date"], y=last7["gas_price"],
+        mode="lines+markers", name="Actual (AAA→GasBuddy fallback)",
+        hovertemplate="Date=%{x|%Y-%m-%d}<br>Retail=$%{y:.3f}<extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=fdates, y=preds, mode="lines+markers+text", name=f"Forecast (k={k})",
+        text=[f"<b>${v:.3f}</b>" for v in preds],
+        textposition="top center",
+        hovertemplate="Date=%{x|%Y-%m-%d}<br>Forecast=$%{y:.3f}<extra></extra>"
+    ))
+    fig.add_vline(x=last7["date"].max(), line_dash="dot", line_color="gray", opacity=0.5)
+    fig.update_layout(
+        title="Simple Beta Model: last 7 actuals and next 7-day forecast",
+        xaxis_title="Date (ET)", yaxis_title="Retail price ($/gal)",
+        height=380, margin=dict(l=40, r=20, t=40, b=40),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ===== 7-row forecast table =====
+    pred_df = pd.DataFrame({
+        "Date": [d.date() for d in fdates],
+        "Predicted Value": [f"${v:.3f}" for v in preds]
+    })
+    st.dataframe(pred_df, use_container_width=True, hide_index=True)
+
+    # ===== Month-end thresholds (simple-beta) =====
+    # Residual bootstrap on the fit_used window
+    # build residuals
+    yhat_fit = alpha + b1*fit_used["rb42_lag"].values + b2*fit_used["wti_lag"].values
+    resid    = fit_used["gas_price"].values - yhat_fit
+    if resid.size == 0:
+        resid = np.array([0.0])
+
+    # Determine the current month-end date
+    today = base["date"].max()
+    month_end = pd.Timestamp(year=today.year, month=today.month, day=pd.Period(today, 'M').days_in_month)
+
+    # Forecast the (lagged) drivers for the month-end day using levels at (month_end - k)
+    ref_eom = month_end - pd.Timedelta(days=k)
+    row_eom = base.loc[base["date"] == ref_eom, ["rbob", "wti"]]
+    if row_eom.empty:
+        rb_eom = float(base["rbob"].dropna().iloc[-1])
+        wt_eom = float(base["wti"].dropna().iloc[-1])
+    else:
+        rb_eom = float(row_eom["rbob"].iloc[0])
+        wt_eom = float(row_eom["wti"].iloc[0])
+
+    eom_point = alpha + b1*(rb_eom*42.0) + b2*wt_eom
+    eom_samples = eom_point + np.random.choice(resid, size=sim_n, replace=True)
+
+    # Make probability table (same format as the advanced model)
+    prob_df = make_threshold_table(eom_samples, float(np.mean(eom_samples)))
+    st.markdown("##### Month-End Thresholds (Simple Beta)")
+    st.caption(f"Mean EOM daily price: ${np.mean(eom_samples):.3f} • 90% CI [{np.percentile(eom_samples,5):.3f}, {np.percentile(eom_samples,95):.3f}]")
+
+    # simple color styling (local to avoid coupling to the advanced section)
+    prob_df['Probability (%)'] = prob_df['Probability (%)'].str.rstrip('%').astype(float)
+    def _color_prob(val):
+        if pd.isna(val): return 'background-color: white'
+        if val >= 80:    return 'background-color: #d4edda; color: #155724'
+        if val >= 60:    return 'background-color: #c3e6cb; color: #155724'
+        if val >= 40:    return 'background-color: #fff3cd; color: #856404'
+        if val >= 20:    return 'background-color: #f8d7da; color: #721c24'
+        return 'background-color: #f5c6cb; color: #721c24'
+    st.dataframe(prob_df.style.applymap(_color_prob, subset=['Probability (%)']),
+                 use_container_width=True, hide_index=True)
+
+    # tiny caption with fitted betas
+    st.caption(f"Fitted: Retail = {alpha:.3f} + {b1:.3f}·(RB*42 lag {k}) + {b2:.3f}·WTI lag {k}")
+
 # >>> FIX for blank tables:
 # The original code opened/closed custom HTML containers and then, inside multiple try/excepts,
 # sometimes *returned early* or never reached st.dataframe when filters produced empty frames.
@@ -672,6 +813,13 @@ def main():
         rows.append({"Description": desc, "Last Value": lv, "Timestamp": ts_str})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+    # >>> ADD: Simple Beta 7-Day view (actuals vs forecast)
+    st.markdown("### Simple Beta Model (RBOB & WTI as drivers)")
+    st.caption("Uses AAA 'as-of-yesterday' for actuals (falls back to GasBuddy), "
+               "and a levels-with-lag OLS on RB*42 and WTI with k=7 days.")
+
+    _render_simple_beta_block(historical_data, k=7, lookback_days=120)
+
     # ============== MODELING ==============
     st.markdown("---")
     st.header("Gas Price Forecasting & Modeling")
@@ -714,7 +862,7 @@ def main():
             st.caption(f"Std dev: **${res['eom_std']:.3f}**, 90% CI [{res['ci5']:.3f}, {res['ci95']:.3f}]")
 
     # >>> 1) Fan chart = Actuals (MTD) + per-day median & σ bands for remaining days
-    g1, g2 = st.columns([3,2])
+    g1, = st.columns([1])
 
     with g1:
         if len(res["future_dates"]) and res["paths"].shape[1]:
@@ -744,57 +892,9 @@ def main():
         else:
             st.info("No remaining days to forecast.")
 
-    with g2:
-        p = res["weekly_prob_higher"]
-        ref_prev = res["weekly_ref_prev_mon"]
-        if np.isnan(p) or np.isnan(ref_prev):
-            st.info("Waiting on valid previous-Monday daily value and next-Monday simulation.")
-        else:
-            now_nyc = datetime.now(tz=ZoneInfo("America/New_York"))
-            wd = now_nyc.weekday()
-            wk_start = (now_nyc - timedelta(days=wd)).replace(hour=12, minute=0, second=0, microsecond=0)
-            if now_nyc < wk_start: wk_start -= timedelta(days=7)
-            snaps = pd.date_range(wk_start, now_nyc, freq="6H")
-            prob_series = pd.Series(p, index=snaps)
 
-            fig_prob = go.Figure()
-            fig_prob.add_trace(go.Scatter(x=prob_series.index, y=prob_series.values,
-                                           mode="lines+markers", name="Probability (%)"))
-            fig_prob.update_yaxes(range=[0,100], ticksuffix="%")
-            fig_prob.add_annotation(x=1, y=1, xref="paper", yref="paper",
-                                    xanchor="right", yanchor="top", showarrow=False, align="right",
-                                    text=f"<b style='font-size:24px;'>{p:.1f}%</b><br><span style='font-size:18px;'>Prev Mon AAA: ${ref_prev:.3f}</span>")
-            fig_prob.update_layout(title="Weekly Probability: Next Monday AAA > Previous Monday",
-                                  height=400, margin=dict(l=40,r=20,t=40,b=40), hovermode='x unified',
-                                   xaxis_title="Time (ET)", yaxis_title="Probability (%)")
-            st.plotly_chart(fig_prob, use_container_width=True)
 
-    # -------- Bottom row: month-end thresholds table centered under the two charts --------
-    st.markdown("#### Month-End Thresholds")
-    st.caption(f"Mean EOM daily price: ${res['eom_mean']:.3f}" if np.isfinite(res['eom_mean']) else "—")
-    
-    # Apply conditional formatting to the probability table
-    prob_df = res["prob_table"].copy()
-    prob_df['Probability (%)'] = prob_df['Probability (%)'].str.rstrip('%').astype(float)
-    
-    # Create color mapping function
-    def color_prob(val):
-        if pd.isna(val):
-            return 'background-color: white'
-        elif val >= 80:
-            return 'background-color: #d4edda; color: #155724'  # Green
-        elif val >= 60:
-            return 'background-color: #c3e6cb; color: #155724'  # Light green
-        elif val >= 40:
-            return 'background-color: #fff3cd; color: #856404'  # Yellow
-        elif val >= 20:
-            return 'background-color: #f8d7da; color: #721c24'  # Light red
-        else:
-            return 'background-color: #f5c6cb; color: #721c24'  # Red
-    
-    # Apply styling
-    styled_df = prob_df.style.applymap(color_prob, subset=['Probability (%)'])
-    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
     
     # Footer
     st.markdown("---")
