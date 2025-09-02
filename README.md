@@ -21,11 +21,12 @@ A comprehensive gas price monitoring system that scrapes data from multiple sour
 - **EIA Data**: Gasoline stocks and refinery runs (daily at 11 AM EST)
 
 ### Technology Stack
-- **Backend**: Python 3.11, Selenium WebDriver, PostgreSQL
+- **Backend**: Python 3.11, Playwright, PostgreSQL
 - **Frontend**: Streamlit, Plotly
 - **Scheduling**: Python schedule library
 - **Cloud**: Railway.app with Nixpacks
 - **Database**: PostgreSQL (cloud-hosted)
+- **Data Import/Export**: Pandas, CSV processing
 
 ## 🚀 Quick Start
 
@@ -57,6 +58,20 @@ A comprehensive gas price monitoring system that scrapes data from multiple sour
    streamlit run dashboard.py
    ```
 
+### Database Management
+
+#### Import CSV Data
+To import cleaned CSV data into the database:
+```bash
+python import_database.py
+```
+
+#### Export Database
+To export current database to CSV:
+```bash
+python export_database_csv.py
+```
+
 ### Cloud Deployment
 
 #### Railway.app Setup
@@ -81,75 +96,84 @@ A comprehensive gas price monitoring system that scrapes data from multiple sour
 
 ```
 gas-scraper/
-├── gas_scraper.py          # Main scraper logic
+├── gas_scraper.py          # Main scraper logic (Playwright-based)
 ├── dashboard.py            # Streamlit dashboard
+├── import_database.py      # Database import utility for CSV data
+├── export_database_csv.py  # Database export utility
 ├── run_scraper.py          # Scraper launcher for Railway
 ├── setup_database.py       # Database initialization
 ├── backup_database.py      # Automated backup system
-├── test_postgresql.py      # Database connection testing
+├── playwright_adapter.py   # Playwright browser automation
 ├── requirements.txt        # Python dependencies
 ├── railway.json           # Railway scraper service config
 ├── railway_dashboard.json # Railway dashboard service config
-├── nixpacks.toml         # Railway build configuration
+├── nixpacks_dashboard.toml # Railway dashboard build config
 ├── Procfile              # Railway process definition
+├── Correct_JKB_Database.csv # Cleaned database export
+├── data/                 # Historical data files
+├── backups/              # Automated backup files
 └── README.md             # This file
 ```
 
 ## ⚙️ Configuration
 
 ### Scraping Intervals
-- **GasBuddy**: Every 15 minutes
-- **AAA**: Daily at 12:01 AM Pacific
-- **RBOB/WTI**: Every 2 hours (Mon-Fri market hours)
-- **EIA Data**: Daily at 11 AM EST
-- **Backups**: Daily at 6 PM EST
-- **Excel Export**: Daily at 5 PM EST
+- **GasBuddy**: Every 10 minutes
+- **AAA**: Daily at 3:30 AM EST (7:30 UTC)
+- **RBOB/WTI**: Every hour (Sun 6pm-Fri 8pm EST)
+- **EIA Data**: Daily at 11:00, 12:00, 13:00, 17:00 EST
+- **Backups**: Daily at 11:00 PM UTC
+- **Excel Export**: Daily at 10:00 PM UTC
 
 ### Database Schema
 ```sql
 CREATE TABLE gas_prices (
-    id SERIAL PRIMARY KEY,
-    source VARCHAR(100),
-    fuel_type VARCHAR(100),
-    price NUMERIC,
-    timestamp VARCHAR(100),
-    region VARCHAR(100),
-    consensus NUMERIC,
-    surprise NUMERIC,
-    scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id BIGSERIAL PRIMARY KEY,
+    source TEXT NOT NULL,
+    fuel_type TEXT,
+    price NUMERIC(10,4),
+    timestamp TEXT,
+    region TEXT,
+    consensus NUMERIC(10,4),
+    surprise NUMERIC(10,4),
+    scraped_at TIMESTAMPTZ NOT NULL,
+    as_of_date DATE
 );
+
+CREATE UNIQUE INDEX ux_gas_prices_unique
+ON gas_prices (source, fuel_type, scraped_at);
 ```
 
 ## 🔧 Troubleshooting
 
 ### Common Issues
 
-#### DevTools Disconnection (Railway)
-**Problem**: `"disconnected: not connected to DevTools"` errors in cloud environment
+#### Playwright Browser Issues (Railway)
+**Problem**: Browser automation failures in cloud environment
 
-**Cause**: Containerized Chrome processes are less stable than local installations
+**Cause**: Containerized browser processes are less stable than local installations
 
 **Solutions**:
-1. **Use GasBuddy Pattern**: All scraping methods now use the proven GasBuddy approach
-2. **Simplified Navigation**: Removed complex retry logic that caused failures
-3. **Proper Driver Cleanup**: Each scraping job creates and destroys its own Chrome driver
-4. **Increased Wait Times**: Longer delays for page loading in cloud environment
+1. **Playwright Configuration**: Optimized browser settings for cloud deployment
+2. **Proper Context Management**: Each scraping job creates and destroys its own browser context
+3. **Increased Wait Times**: Longer delays for page loading in cloud environment
+4. **Error Handling**: Comprehensive retry logic and graceful failure handling
 
-#### Chrome Binary Issues
-**Problem**: Chrome/Chromium not found in Railway environment
+#### Database Import Issues
+**Problem**: CSV import failures with timestamp parsing errors
 
-**Solution**: Nixpacks configuration with system dependencies
-```toml
-[phases.setup]
-nixPkgs = ["python311", "postgresql_16.dev", "gcc", "chromium", "chromedriver", "coreutils", "findutils"]
-```
+**Solutions**:
+1. **Data Validation**: Robust validation of numeric columns before import
+2. **Timestamp Parsing**: Source-specific timestamp parsing logic
+3. **Duplicate Handling**: Proper deduplication based on unique constraints
+4. **Error Logging**: Detailed error messages for troubleshooting
 
 ### Local vs Cloud Differences
 
 | Aspect | Local | Railway |
 |--------|-------|---------|
-| Chrome Stability | ✅ High | ⚠️ Medium |
-| DevTools Connection | ✅ Stable | ⚠️ Fragile |
+| Browser Stability | ✅ High | ⚠️ Medium |
+| Playwright Performance | ✅ Fast | ⚠️ Slower |
 | Resource Availability | ✅ Unlimited | ⚠️ Limited |
 | Network Latency | ✅ Low | ⚠️ Variable |
 | Process Management | ✅ Native | ⚠️ Containerized |
@@ -157,12 +181,13 @@ nixPkgs = ["python311", "postgresql_16.dev", "gcc", "chromium", "chromedriver", 
 ## 📊 Data Flow
 
 1. **Scheduler triggers** scraping jobs based on configured intervals
-2. **Selenium WebDriver** navigates to target websites
+2. **Playwright browser** navigates to target websites
 3. **Data extraction** using CSS selectors and page parsing
 4. **PostgreSQL storage** with automatic timestamping
 5. **Dashboard updates** in real-time from database
 6. **Automated backups** to CSV and SQL formats
 7. **Excel exports** for daily and monthly reporting
+8. **CSV import/export** for data management and migration
 
 ## 🚨 Monitoring & Alerts
 
@@ -174,21 +199,22 @@ nixPkgs = ["python311", "postgresql_16.dev", "gcc", "chromium", "chromedriver", 
 
 ### Health Checks
 - Database connection status
-- Chrome driver availability
+- Playwright browser availability
 - Scraping success rates
 - Backup completion status
+- Data import/export functionality
 
 ## 🔒 Security & Best Practices
 
 - **Environment Variables**: Sensitive data stored in Railway environment
 - **Database Isolation**: Separate database service for data persistence
-- **Process Cleanup**: Automatic Chrome process cleanup after each job
+- **Process Cleanup**: Automatic browser process cleanup after each job
 - **Error Handling**: Comprehensive exception handling and logging
 - **Resource Management**: Efficient memory and CPU usage
 
 ## 📈 Performance Optimization
 
-- **Driver Reuse**: Each scraping job uses fresh Chrome driver
+- **Browser Context Management**: Each scraping job uses fresh browser context
 - **Parallel Processing**: Independent scraping jobs don't block each other
 - **Memory Management**: Automatic cleanup of browser processes
 - **Network Efficiency**: Optimized wait times for different websites
@@ -215,6 +241,6 @@ For issues and questions:
 
 ---
 
-**Last Updated**: August 25, 2025  
-**Version**: 2.0.0  
+**Last Updated**: September 2, 2025  
+**Version**: 2.1.0  
 **Status**: Production Ready ✅
