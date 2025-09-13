@@ -6,6 +6,17 @@ from datetime import datetime, timedelta
 import os
 import numpy as np
 from zoneinfo import ZoneInfo
+from typing import Tuple
+
+# === Tunables (model behavior) ===
+LOOKBACK_DAYS   = 120
+HALF_LIFE_DAYS  = 90
+RIDGE_L2        = 5e-4   # slightly less shrinkage
+AAA_EWM_SPAN    = 2      # a bit more responsive
+SLOPE_CLIP_CPD  = 0.03   # allow ~3¢/day before tanh clips
+SLOPE_DECAY_FWD = 0.70   # fade slower to preserve near-term vol
+MIN_FIT_ROWS    = 24     # lower hard minimum
+from typing import Tuple
 
 # ============== PAGE & CSS ==============
 st.set_page_config(page_title="Gas Price Dashboard", page_icon="⛽", layout="wide", initial_sidebar_state="expanded")
@@ -114,6 +125,43 @@ def averages_table(data: pd.DataFrame, label: str):
                        f'{label}':[fmt(daily), fmt(mtd), fmt(wtd)]})
     st.dataframe(df, use_container_width=True, hide_index=True)
 
+# ============== NEW: Robust smoothing for futures (model inputs only) ==============
+def _hampel_ewma(series: pd.Series, window: int = 7, nsigmas: float = 3.0, ewma_span: int = 3) -> pd.Series:
+    """
+    Robust outlier repair (MAD/Hampel-style) + gentle EWMA smoothing.
+    - Replaces points |x - median| > nsigmas * 1.4826 * MAD with rolling median.
+    - Then applies EWMA (span=ewma_span) to the repaired series.
+    """
+    s = pd.to_numeric(series, errors="coerce").astype(float)
+    if s.dropna().empty:
+        return s
+
+    med = s.rolling(window=window, center=True, min_periods=max(3, window//2)).median()
+    mad = (s - med).abs().rolling(window=window, center=True, min_periods=max(3, window//2)).median()
+    # consistent with σ under Gaussian: 1.4826 * MAD
+    thresh = nsigmas * 1.4826 * mad
+    out = s.copy()
+    mask = (s - med).abs() > thresh
+    out[mask] = med[mask]
+
+    # EWMA smoothing (keeps responsiveness)
+    out = out.ewm(span=ewma_span, adjust=False, min_periods=1).mean()
+    return out
+
+def _hampel(x: pd.Series, k: int = 3, n_sig: float = 3.0) -> pd.Series:
+    # robust outlier replacement (median ± n_sig*MAD) over a 2k+1 window
+    x = pd.Series(x, dtype='float64').copy()
+    med = x.rolling(2*k+1, center=True, min_periods=1).median()
+    mad = (x - med).abs().rolling(2*k+1, center=True, min_periods=1).median()
+    thresh = n_sig * 1.4826 * mad
+    out = x.copy()
+    mask = (x - med).abs() > thresh
+    out[mask] = med[mask]
+    return out
+
+def _robust_smooth(series: pd.Series, k: int = 3, n_sig: float = 3.0, ewma_span: int = 5) -> pd.Series:
+    return _hampel(series, k=k, n_sig=n_sig).ewm(span=ewma_span, adjust=False).mean()
+
 # ============== SIMPLE DAILY PANEL (AAA first → GB fallback) ==============
 def _daily_panel(h: pd.DataFrame) -> pd.DataFrame:
     df = h.copy()
@@ -182,7 +230,19 @@ def _daily_panel(h: pd.DataFrame) -> pd.DataFrame:
 
     # AAA first, else GasBuddy, else backfill
     base["gas_price"] = base["aaa"].combine_first(base["gb"]).ffill().bfill()
-    for c in ["rbob","wti","stocks_surprise","refinery_runs"]:
+
+    # Safe GB gap (fill missing with 0)
+    base["GB_gap"] = (base.get("gb") - base["aaa"]).fillna(0.0)
+
+    # Fill and SMOOTH futures (model inputs only)
+    for c in ["rbob","wti"]:
+        if c in base.columns:
+            base[c] = base[c].ffill().bfill()
+            sm = _hampel_ewma(base[c], window=7, nsigmas=3.0, ewma_span=3)
+            base[c + "_sm"] = sm.ffill().bfill()
+
+    # Forward-fill EIA proxies
+    for c in ["stocks_surprise","refinery_runs"]:
         if c in base.columns:
             base[c] = base[c].ffill()
 
@@ -194,7 +254,6 @@ def _add_pulses(base: pd.DataFrame, decay=[1.0, 0.6, 0.36, 0.216]) -> pd.DataFra
     s = df.get("stocks_surprise", pd.Series(0.0, index=df.index)).fillna(0.0)
     r = df.get("refinery_runs",  pd.Series(0.0, index=df.index)).fillna(0.0)
 
-    # finite impulse response: sum_{i=0..L-1} w_i * x_{t-i}
     def pulse(x):
         out = pd.Series(0.0, index=x.index)
         for i, w in enumerate(decay):
@@ -209,207 +268,259 @@ def _forecast_future_pulses(base_with_pulses: pd.DataFrame, future_dates: pd.Dat
     """Project pulses over the next few days assuming no new EIA prints (they decay to zero)."""
     L = len(decay)
     df = base_with_pulses.sort_values("date").copy()
-    last_date = df["date"].max()
-
-    # tails of the underlying weekly inputs
     s = df.get("stocks_surprise", pd.Series(0.0, index=df.index)).fillna(0.0).values
     r = df.get("refinery_runs",  pd.Series(0.0, index=df.index)).fillna(0.0).values
     s_tail = s[-L:] if len(s) >= L else np.r_[np.zeros(L-len(s)), s]
     r_tail = r[-L:] if len(r) >= L else np.r_[np.zeros(L-len(r)), r]
-
-    # weights w0..w_{L-1}
     w = np.array(decay, dtype=float)
 
-    stocks_future = []
-    runs_future   = []
+    stocks_future, runs_future = [], []
     for h in range(1, len(future_dates)+1):
-        # pulse_{T+h} = sum_{i=h..L-1} w_i * x_{T-(i-h)}
         idxs = np.arange(h, L)
         if len(idxs) == 0:
-            stocks_future.append(0.0)
-            runs_future.append(0.0)
-            continue
+            stocks_future.append(0.0); runs_future.append(0.0); continue
         stocks_future.append( float((w[idxs] * s_tail[-1 - (idxs - h)]).sum()) )
         runs_future.append(   float((w[idxs] * r_tail[-1 - (idxs - h)]).sum()) )
 
-    future_df = pd.DataFrame({
+    return pd.DataFrame({
         "date": future_dates,
         "stocks_pulse": np.array(stocks_future),
         "refinery_pulse": np.array(runs_future)
     })
-    return future_df
 
-# ============== SIMPLE BETA with OPTIONAL EIA PULSES (k=7) ==============
-def _simple_beta_fit_predict_with_eia(h: pd.DataFrame, k: int = 7, lookback_days: int = 120, improve_tol: float = 0.01):
-    base = _daily_panel(h)
-    if base.empty or base[["rbob","wti","gas_price"]].dropna().empty:
-        return {"error":"Not enough data for simple beta."}
 
-    base = base.sort_values("date").copy()
-    base["rb42_lag"] = (base["rbob"] * 42.0).shift(k)
-    base["wti_lag"]  = base["wti"].shift(k)
+def fit_aaa_nowcast_and_week(
+    h: pd.DataFrame,
+    k_lag:int=7,
+    lookback_days:int=180,
+    half_life_days:int=90,
+    gate_tol:float=0.03,
+    sim_n:int=5000,
+    min_rows:int=24,     # use the lower hard minimum you set up top
+):
+    base = _daily_panel(h).sort_values("date").copy()
+    if base.empty:
+        return {"error":"No history"}
 
-    # add pulses
-    base_p = _add_pulses(base)
+    # true AAA for charting; Y is training target (AAA -> GB fallback)
+    base["AAA"] = base.get("aaa")
+    base["Y"]   = base["AAA"].combine_first(base.get("gas_price"))
 
-    fit = base_p.dropna(subset=["gas_price","rb42_lag","wti_lag"]).copy()
-    if len(fit) < 30:
-        return {"error":"Insufficient rows after lagging."}
+    # smoothed futures (model inputs only)
+    base["rb_sm"]  = _robust_smooth(base["rbob"])
+    base["wti_sm"] = _robust_smooth(base["wti"])
 
-    cutoff = base_p["date"].max() - pd.Timedelta(days=lookback_days)
-    use = fit[fit["date"] >= cutoff]
-    if len(use) < 25:
-        use = fit
+    # slope source is AAA->GB so gaps don't kill slope
+    slope_src        = base["AAA"].combine_first(base["gas_price"])
+    base["AAA_l1"]   = base["AAA"].fillna(slope_src).shift(1)
+    base["AAA_ewm"]  = slope_src.ewm(span=AAA_EWM_SPAN, adjust=False).mean()
+    raw_slope        = (base["AAA_ewm"] - base["AAA_ewm"].shift(7)) / 7.0
+    base["AAA_slope7"]= np.tanh(raw_slope / SLOPE_CLIP_CPD) * SLOPE_CLIP_CPD
 
-    # split 80/20
-    cut = int(len(use)*0.8)
-    train = use.iloc[:cut]
-    valid = use.iloc[cut:] if len(use) > cut else use.iloc[-1:]
+    # 7-day lag futures & crack
+    base["rb42_l7"]  = (base["rb_sm"]*42.0).shift(k_lag)
+    base["wti_l7"]   = base["wti_sm"].shift(k_lag)
+    base["crack_l7"] = (base["rb_sm"]*42.0 - base["wti_sm"]).shift(k_lag)
+    base["d_crack7"] = base["crack_l7"] - base["crack_l7"].shift(7)
 
-    # baseline fit
-    Xb = np.column_stack([np.ones(len(train)), train["rb42_lag"].values, train["wti_lag"].values])
-    yb = train["gas_price"].values
-    ab,b1b,b2b = np.linalg.lstsq(Xb, yb, rcond=None)[0]
-    # baseline val MAE
-    Xb_v = np.column_stack([np.ones(len(valid)), valid["rb42_lag"].values, valid["wti_lag"].values])
-    yhat_b = Xb_v @ np.array([ab,b1b,b2b])
-    mae_b = float(np.mean(np.abs(valid["gas_price"].values - yhat_b)))
+    # GB gap (safe)
+    base["GB_gap"] = (base.get("gb", pd.Series(index=base.index)) - base["AAA"]).fillna(0.0)
 
-    # augmented with pulses
-    Xa = np.column_stack([np.ones(len(train)), train["rb42_lag"].values, train["wti_lag"].values,
-                          train["stocks_pulse"].values, train["refinery_pulse"].values])
-    aa,b1a,b2a,g1a,g2a = np.linalg.lstsq(Xa, yb, rcond=None)[0]
-    Xa_v = np.column_stack([np.ones(len(valid)), valid["rb42_lag"].values, valid["wti_lag"].values,
-                            valid["stocks_pulse"].values, valid["refinery_pulse"].values])
-    yhat_a = Xa_v @ np.array([aa,b1a,b2a,g1a,g2a])
-    mae_a = float(np.mean(np.abs(valid["gas_price"].values - yhat_a)))
+    # weekly pulses
+    base = _add_pulses(base)
 
-    use_pulses = (mae_a < mae_b * (1 - improve_tol))
+    # ------- build training window
+    cutoff = base["date"].max() - pd.Timedelta(days=lookback_days)
+    # IMPORTANT: drop on Y (not AAA) so we keep AAA-missing days
+    fit = base[(base["date"]>=cutoff)].dropna(
+        subset=["Y","AAA_l1","AAA_slope7","rb42_l7","wti_l7"]
+    ).copy()
 
-    # choose params
-    if use_pulses:
-        params = {"alpha":aa, "b1":b1a, "b2":b2a, "g1":g1a, "g2":g2a}
-        resid_train = train["gas_price"].values - (Xa @ np.array([aa,b1a,b2a,g1a,g2a]))
+    # if still thin, allow missing crack features (set to 0)
+    if "crack_l7" in fit and fit["crack_l7"].isna().any():
+        fit["crack_l7"] = fit["crack_l7"].fillna(0.0)
+    if "d_crack7" in fit and fit["d_crack7"].isna().any():
+        fit["d_crack7"] = fit["d_crack7"].fillna(0.0)
+
+    # If not enough rows, skip to fallback later (don't return an error)
+    has_enough = len(fit) >= min_rows
+
+    # -------------- MODEL BRANCH --------------
+    if has_enough:
+        ages = (fit["date"].max() - fit["date"]).dt.days.astype(float)
+        lam  = np.log(2.0) / max(1, half_life_days)
+        w    = np.exp(-lam * ages.values)
+
+        def _wls_ridge(X, y, w, l2=RIDGE_L2):
+            X = np.asarray(X, float); y = np.asarray(y, float).reshape(-1)
+            W = np.sqrt(np.asarray(w, float).reshape(-1))
+            Xw = X * W[:, None]; yw = y * W
+            I  = np.eye(Xw.shape[1]); I[0,0] = 0.0
+            return np.linalg.solve(Xw.T @ Xw + l2*I, Xw.T @ yw)
+
+        Xb = np.column_stack([
+            np.ones(len(fit), float),
+            fit["AAA_l1"], fit["AAA_slope7"],
+            fit["rb42_l7"], fit["wti_l7"],
+            fit["crack_l7"], fit["d_crack7"],
+            fit["GB_gap"],
+        ]).astype(float)
+        yb = fit["Y"].values
+
+        X_aug = np.column_stack([
+            Xb,
+            fit.get("stocks_pulse",   pd.Series(np.zeros(len(fit)))).values.astype(float),
+            fit.get("refinery_pulse", pd.Series(np.zeros(len(fit)))).values.astype(float),
+        ])
+
+        b_base = np.asarray(_wls_ridge(Xb,   yb, w)).reshape(-1)
+        b_aug  = np.asarray(_wls_ridge(X_aug,yb, w)).reshape(-1)
+
+        cut      = int(len(fit)*0.8)
+        mae_base = float(np.mean(np.abs(yb[cut:] - (Xb[cut:]   @ b_base))))
+        mae_aug  = float(np.mean(np.abs(yb[cut:] - (X_aug[cut:] @ b_aug))))
+        use_pulses = (mae_aug <= mae_base*(1.0 - gate_tol))
+        betas      = b_aug if use_pulses else b_base
+
+        yhat_in = (X_aug @ betas) if use_pulses else (Xb @ betas)
+        resid   = (yb - yhat_in[:len(yb)]).astype(float)
+        if resid.size == 0:
+            resid = base["Y"].diff().dropna().tail(60).values
+            if resid.size == 0: resid = np.array([0.0], float)
+
+        # forecast horizon: start day after last true AAA → ensures a 9/12 point
+        last_aaa_date = base.loc[base["AAA"].notna(), "date"].max()
+        if pd.isna(last_aaa_date): last_aaa_date = base["date"].max()
+        start = last_aaa_date + pd.Timedelta(days=1)
+        eom   = pd.Timestamp(year=start.year, month=start.month,
+                             day=pd.Period(start,'M').days_in_month)
+        horizon_days = max(7, (eom - start).days + 1)
+        fdates = pd.date_range(start, periods=horizon_days, freq="D")
+
+        # seed slope with last observed (fade more slowly for higher vol)
+        seed = base["AAA"].dropna() if base["AAA"].notna().any() else base["Y"].dropna()
+        slope0 = (seed.iloc[-1] - seed.iloc[-7]) / 7.0 if len(seed) >= 7 else 0.0
+
+        out = []
+        gb_gap_once = float(base.loc[base["date"]==last_aaa_date, "GB_gap"].fillna(0.0).tail(1).iloc[0]) \
+                      if "GB_gap" in base.columns and len(base) else 0.0
+
+        for h, d in enumerate(fdates, start=1):
+            ref = d - pd.Timedelta(days=k_lag)
+            rb_ref  = base.loc[base["date"]==ref,"rb_sm"]
+            wti_ref = base.loc[base["date"]==ref,"wti_sm"]
+            rb_ref  = float(rb_ref.iloc[0])  if len(rb_ref)  else float(base["rb_sm"].dropna().iloc[-1])
+            wti_ref = float(wti_ref.iloc[0]) if len(wti_ref) else float(base["wti_sm"].dropna().iloc[-1])
+
+            row = [
+                1.0,
+                float(seed.iloc[-1] if len(seed) else base["Y"].dropna().iloc[-1]),
+                float(slope0 * (SLOPE_DECAY_FWD ** (h-1))),
+                rb_ref*42.0, wti_ref,
+                float((base["rb_sm"].iloc[-1]*42.0 - base["wti_sm"].iloc[-1]) if len(base) else 0.0),
+                0.0,   # d_crack7 for the step → 0
+                gb_gap_once if h==1 else 0.0,
+            ]
+            if use_pulses:
+                row += [
+                    float(base.get("stocks_pulse",   pd.Series([0.0])).iloc[-1]),
+                    float(base.get("refinery_pulse", pd.Series([0.0])).iloc[-1]),
+                ]
+            yhat = float(np.dot(betas, np.asarray(row, float)))
+            out.append({"date": d, "AAA": yhat})
+            seed = pd.concat([seed, pd.Series([yhat])], ignore_index=True)
+
+        preds_series = pd.Series({r["date"]: r["AAA"] for r in out})
+
+    # -------------- FALLBACK BRANCH --------------
     else:
-        params = {"alpha":ab, "b1":b1b, "b2":b2b, "g1":0.0, "g2":0.0}
-        resid_train = train["gas_price"].values - (Xb @ np.array([ab,b1b,b2b]))
+        # slope-decay extrapolation using latest Y (ensures a value for 9/12)
+        resid = base["Y"].diff().dropna().tail(60).values
+        if resid.size == 0: resid = np.array([0.0], float)
 
-    # Next 7 days predictions -----------------------------------
-    start_date   = base_p["date"].max() + pd.Timedelta(days=1)
-    future_dates = pd.date_range(start_date, periods=7, freq="D")
+        last_aaa_date = base.loc[base["AAA"].notna(), "date"].max()
+        if pd.isna(last_aaa_date): last_aaa_date = base["date"].max()
+        start = last_aaa_date + pd.Timedelta(days=1)
+        eom   = pd.Timestamp(year=start.year, month=start.month,
+                             day=pd.Period(start,'M').days_in_month)
+        horizon_days = max(7, (eom - start).days + 1)
+        fdates = pd.date_range(start, periods=horizon_days, freq="D")
 
-    preds = []
-    pred_base = []
-    stocks_contrib = []
-    runs_contrib   = []
+        seed = base["AAA"].dropna()
+        if seed.empty: seed = base["Y"].dropna()
+        last = float(seed.iloc[-1]) if len(seed) else 0.0
+        slope0 = (seed.iloc[-1] - seed.iloc[-7]) / 7.0 if len(seed) >= 7 else 0.0
 
-    # precompute future pulses
-    future_pulses = _forecast_future_pulses(base_p, future_dates)
-    base_pulsed = pd.concat([base_p, future_pulses], ignore_index=True)
+        preds_series = pd.Series([last + slope0*(SLOPE_DECAY_FWD**(h-1))
+                                  for h in range(1, len(fdates)+1)], index=fdates)
+        mae_base = mae_aug = np.nan
 
-    for d in future_dates:
-        ref = d - pd.Timedelta(days=k)
-        row = base_pulsed.loc[base_pulsed["date"] == ref, ["rbob", "wti"]]
-        if row.empty:
-            # Get the last available values, with fallback to 0 if no data
-            rb_data = base_pulsed["rbob"].dropna()
-            wt_data = base_pulsed["wti"].dropna()
-            rb = float(rb_data.iloc[-1]) if len(rb_data) > 0 else 0.0
-            wt = float(wt_data.iloc[-1]) if len(wt_data) > 0 else 0.0
-        else:
-            rb = float(row["rbob"].iloc[0]); wt = float(row["wti"].iloc[0])
+    # common outputs
+    next_7_dates = fdates[:7]
+    preds_7      = preds_series.reindex(next_7_dates).values.astype(float)
 
-        base_part = params["alpha"] + params["b1"]*(rb*42.0) + params["b2"]*wt
-        # pulses at day d
-        sp = 0.0
-        rp = 0.0
-        if "stocks_pulse" in base_pulsed:
-            stocks_data = base_pulsed.loc[base_pulsed["date"]==d, "stocks_pulse"].values
-            if len(stocks_data) > 0:
-                sp = float(stocks_data[0])
-        if "refinery_pulse" in base_pulsed:
-            runs_data = base_pulsed.loc[base_pulsed["date"]==d, "refinery_pulse"].values
-            if len(runs_data) > 0:
-                rp = float(runs_data[0])
+    def _next_sun(d):
+        while d.weekday()!=6: d += pd.Timedelta(days=1)
+        return d
+    next_sunday = _next_sun(base["date"].max()+pd.Timedelta(days=1))
+    next_sunday_point = float(preds_series.loc[next_sunday]) if next_sunday in preds_series.index else float(preds_7[-1])
 
-        pulse_part = params["g1"]*sp + params["g2"]*rp if use_pulses else 0.0
-        preds.append(base_part + pulse_part)
-        pred_base.append(base_part)
-        stocks_contrib.append(params["g1"]*sp)
-        runs_contrib.append(params["g2"]*rp)
-
-    preds = np.array(preds)
-    pred_base = np.array(pred_base)
-    stocks_contrib = np.array(stocks_contrib)
-    runs_contrib   = np.array(runs_contrib)
-
-    # EOM threshold table via residual bootstrap -----------------
-    resid = resid_train if resid_train.size else np.array([0.0])
-    today = base_p["date"].max()
-    month_end = pd.Timestamp(year=today.year, month=today.month, day=pd.Period(today, 'M').days_in_month)
-    ref_eom = month_end - pd.Timedelta(days=k)
-    row_eom = base_pulsed.loc[base_pulsed["date"] == ref_eom, ["rbob","wti"]]
-    if row_eom.empty:
-        # Get the last available values, with fallback to 0 if no data
-        rb_data = base_pulsed["rbob"].dropna()
-        wt_data = base_pulsed["wti"].dropna()
-        rb_eom = float(rb_data.iloc[-1]) if len(rb_data) > 0 else 0.0
-        wt_eom = float(wt_data.iloc[-1]) if len(wt_data) > 0 else 0.0
-    else:
-        rb_eom = float(row_eom["rbob"].iloc[0]); wt_eom = float(row_eom["wti"].iloc[0])
-
-    base_eom = params["alpha"] + params["b1"]*(rb_eom*42.0) + params["b2"]*wt_eom
-    # pulses at month end (decayed)
-    sp_eom = 0.0
-    rp_eom = 0.0
-    if "stocks_pulse" in base_pulsed:
-        stocks_eom_data = base_pulsed.loc[base_pulsed["date"]==month_end, "stocks_pulse"].values
-        if len(stocks_eom_data) > 0:
-            sp_eom = float(stocks_eom_data[0])
-    if "refinery_pulse" in base_pulsed:
-        runs_eom_data = base_pulsed.loc[base_pulsed["date"]==month_end, "refinery_pulse"].values
-        if len(runs_eom_data) > 0:
-            rp_eom = float(runs_eom_data[0])
-    eom_point = base_eom + (params["g1"]*sp_eom + params["g2"]*rp_eom if use_pulses else 0.0)
-    sim_n = 5000
-    eom_samples = eom_point + np.random.choice(resid, size=sim_n, replace=True)
-
-    # latest event dates/values for display ----------------------
-    # Use original historical h with event_date
-    df = h.copy()
-    df["timestamp"]  = pd.to_datetime(df.get("timestamp"), errors="coerce", utc=True)
-    df["event_date"] = df["timestamp"].dt.tz_convert("America/New_York").dt.normalize()
-
-    stocks_rows = df[df["source"]=="tradingeconomics_gasoline_stocks"].dropna(subset=["event_date"])
-    runs_rows   = df[df["source"]=="tradingeconomics_refinery_runs"].dropna(subset=["event_date"])
-    last_stock_date = pd.to_datetime(stocks_rows["event_date"].max()) if not stocks_rows.empty else pd.NaT
-    last_runs_date  = pd.to_datetime(runs_rows["event_date"].max())   if not runs_rows.empty else pd.NaT
-    last_stock_surprise = float(stocks_rows.loc[stocks_rows["event_date"]==last_stock_date, "surprise"].mean()) if pd.notna(last_stock_date) else np.nan
-    last_runs_value     = float(runs_rows.loc[runs_rows["event_date"]==last_runs_date, "price"].mean()) if pd.notna(last_runs_date) else np.nan
+    eom_point   = float(preds_series.loc[eom]) if eom in preds_series.index else np.nan
+    eom_samples = (eom_point + np.random.choice(resid, size=sim_n, replace=True)) if np.isfinite(eom_point) else np.array([])
 
     return {
-        "base_df": base_p,
-        "future_dates": future_dates,
-        "preds": preds,
-        "preds_base": pred_base,
-        "params": params,
-        "use_pulses": bool(use_pulses),
-        "mae_base": mae_b,
-        "mae_aug": mae_a,
-        "stocks_contrib": stocks_contrib,
-        "runs_contrib": runs_contrib,
+        "base": base,
+        "future_dates": next_7_dates,
+        "preds": preds_7,
+        "resid": resid,
+        "next_sunday": next_sunday,
+        "next_sunday_point": next_sunday_point,
+        "used_pulses": bool(has_enough),
+        "val_mae_base": (mae_base if has_enough else np.nan),
+        "val_mae_aug":  (mae_aug  if has_enough else np.nan),
+        "eom_point": eom_point,
         "eom_samples": eom_samples,
-        "last_stock_date": last_stock_date,
-        "last_runs_date": last_runs_date,
-        "last_stock_surprise": last_stock_surprise,
-        "last_runs_value": last_runs_value
     }
 
-def _prev_aaa_sunday_default(h: pd.DataFrame) -> tuple[float, datetime]:
+def _prev_aaa_sunday_default(h: pd.DataFrame) -> Tuple[float, datetime]:
     aaa = h[h["source"]=="aaa_gas_prices"].copy()
     if aaa.empty:
         return np.nan, None
-    aaa["scraped_at"] = pd.to_datetime(aaa["scraped_at"], errors="coerce", utc=True).dt.tz_convert("America/New_York")
+    aaa["scraped_at"] = to_est(aaa["scraped_at"]) 
+    aaa["as_of_date"] = (aaa["scraped_at"] - pd.Timedelta(days=1)).dt.date
+    sundays = aaa[aaa["as_of_date"].apply(lambda d: pd.Timestamp(d).weekday()==6)]
+    if sundays.empty:
+        return np.nan, None
+    last_sun = max(sundays["as_of_date"])
+    val = float(sundays.loc[sundays["as_of_date"]==last_sun,"price"].mean())
+    return val, pd.Timestamp(last_sun)
+
+def _next_sunday(date_from: pd.Timestamp) -> pd.Timestamp:
+    d = date_from + pd.Timedelta(days=1)
+    while d.weekday() != 6:  # 6=Sunday
+        d += pd.Timedelta(days=1)
+    return d
+
+def round_to_05(x):
+    return np.round(x*20)/20.0
+
+def _make_threshold_table(eom_samples: np.ndarray, center: float) -> pd.DataFrame:
+    if eom_samples.size == 0 or not np.isfinite(center):
+        return pd.DataFrame(columns=["Threshold ($)", "Probability (%)"])
+    c = np.round(center*20)/20.0
+    thresholds = np.array([c-0.10, c-0.05, c, c+0.05, c+0.10, c+0.15])
+    rows = [{"Threshold ($)": f"${t:.2f}",
+             "Probability (%)": f"{(eom_samples > t).mean()*100:.1f}%"} for t in thresholds]
+    return pd.DataFrame(rows)
+
+
+# ============== APP ==============
+
+def _prev_aaa_sunday_default(h: pd.DataFrame) -> Tuple[float, datetime]:
+    aaa = h[h["source"]=="aaa_gas_prices"].copy()
+    if aaa.empty:
+        return np.nan, None
+    aaa["scraped_at"] = to_est(aaa["scraped_at"]) 
     aaa["as_of_date"] = (aaa["scraped_at"] - pd.Timedelta(days=1)).dt.date
     sundays = aaa[aaa["as_of_date"].apply(lambda d: pd.Timestamp(d).weekday()==6)]
     if sundays.empty:
@@ -437,96 +548,8 @@ def _make_threshold_table(eom_samples: np.ndarray, center: float) -> pd.DataFram
     return pd.DataFrame(rows)
 
 def _render_simple_beta_block(h: pd.DataFrame, k: int = 7, lookback_days: int = 120):
-    res = _simple_beta_fit_predict_with_eia(h, k=k, lookback_days=lookback_days)
-    if "error" in res:
-        st.info(res["error"])
-        return
-
-    # ---------- INFO STRIP (requested) ----------
-    lsd = res["last_stock_date"]
-    lrd = res["last_runs_date"]
-    lsd_txt = "—" if pd.isna(lsd) else pd.Timestamp(lsd).date().isoformat()
-    lrd_txt = "—" if pd.isna(lrd)  else pd.Timestamp(lrd).date().isoformat()
-
-    # impacts (in cents)
-    s_imp_tom = 100*res["stocks_contrib"][0] if len(res["stocks_contrib"]) else 0.0
-    r_imp_tom = 100*res["runs_contrib"][0]   if len(res["runs_contrib"])   else 0.0
-    s_imp_avg = 100*float(np.mean(res["stocks_contrib"])) if len(res["stocks_contrib"]) else 0.0
-    r_imp_avg = 100*float(np.mean(res["runs_contrib"]))   if len(res["runs_contrib"])   else 0.0
-
-    used = res["use_pulses"]
-    use_txt = "using EIA pulses (stocks surprise & refinery runs value)" if used else "not used (no validation gain)"
-
-    # Create the info strip HTML
-    info_html = f"""
-<div class="info-strip">
-  <div>
-    <div class="label">EIA Gasoline Stocks</div>
-    <div>Date of last release: <b>{lsd_txt}</b></div>
-    <div class="light">Feature used: <b>surprise</b> (actual − consensus)</div>
-    <div class="muted">Impact on forecast: {('+' if s_imp_tom>=0 else '')}{s_imp_tom:.1f}¢ tomorrow; {('+' if s_imp_avg>=0 else '')}{s_imp_avg:.1f}¢ avg next 7 days</div>
-  </div>
-  <div>
-    <div class="label">Refinery Runs</div>
-    <div>Date of last release: <b>{lrd_txt}</b></div>
-    <div class="light">Feature used: <b>value</b> (level)</div>
-    <div class="muted">Impact on forecast: {('+' if r_imp_tom>=0 else '')}{r_imp_tom:.1f}¢ tomorrow; {('+' if r_imp_avg>=0 else '')}{r_imp_avg:.1f}¢ avg next 7 days</div>
-  </div>
-</div>
-<p class="muted">Model is {use_txt}.  Stocks use the weekly <i>surprise</i>; runs use the weekly <i>value</i>. Weekly effects decay quickly.</p>
-"""
-    st.markdown(info_html, unsafe_allow_html=True)
-
-    # ---------- TITLE ----------
-    st.markdown("### Simple Beta Model (RBOB & WTI as drivers, optional EIA pulses)")
-
-    # ---------- CHART ----------
-    last7 = res["base_df"].tail(7)[["date","gas_price"]]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=last7["date"], y=last7["gas_price"],
-        mode="lines+markers", name="Actual (AAA→GasBuddy fallback)",
-        hovertemplate="Date=%{x|%Y-%m-%d}<br>Retail=$%{y:.3f}<extra></extra>"
-    ))
-    fig.add_trace(go.Scatter(
-        x=res["future_dates"], y=res["preds"], mode="lines+markers+text",
-        name="Forecast (k=7)", text=[f"<b>${v:.3f}</b>" for v in res["preds"]],
-        textposition="top center",
-        hovertemplate="Date=%{x|%Y-%m-%d}<br>Forecast=$%{y:.3f}<extra></extra>"
-    ))
-    fig.add_vline(x=last7["date"].max(), line_dash="dot", line_color="gray", opacity=0.5)
-    fig.update_layout(
-        xaxis_title="Date (ET)", yaxis_title="Retail price ($/gal)",
-        height=380, margin=dict(l=40, r=20, t=40, b=40),
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # ---------- 7-row forecast table ----------
-    pred_df = pd.DataFrame({
-        "Date": [d.date() for d in res["future_dates"]],
-        "Predicted Value": [f"${v:.3f}" for v in res["preds"]],
-        "EIA Stocks Impact (¢)": [f"{100*s:.1f}" for s in res["stocks_contrib"]],
-        "Refinery Runs Impact (¢)": [f"{100*r:.1f}" for r in res["runs_contrib"]],
-    })
-    st.dataframe(pred_df, use_container_width=True, hide_index=True)
-
-    # ---------- Month-end thresholds ----------
-    prob_df = _make_threshold_table(res["eom_samples"], float(np.mean(res["eom_samples"])))
-    st.markdown("##### Month-End Thresholds (from residual bootstrap)")
-    st.caption(f"Mean EOM daily price: ${np.mean(res['eom_samples']):.3f} • 90% CI [{np.percentile(res['eom_samples'],5):.3f}, {np.percentile(res['eom_samples'],95):.3f}]")
-    prob_df['Probability (%)'] = prob_df['Probability (%)'].str.rstrip('%').astype(float)
-
-    def _color_prob(val):
-        if pd.isna(val): return 'background-color: white'
-        if val >= 80:    return 'background-color: #d4edda; color: #155724'
-        if val >= 60:    return 'background-color: #c3e6cb; color: #155724'
-        if val >= 40:    return 'background-color: #fff3cd; color: #856404'
-        if val >= 20:    return 'background-color: #f8d7da; color: #721c24'
-        return 'background-color: #f5c6cb; color: #721c24'
-    st.dataframe(prob_df.style.applymap(_color_prob, subset=['Probability (%)']),
-                 use_container_width=True, hide_index=True)
+    # Legacy block removed per AAA-only forecasting spec.
+    return
 
 # ============== APP ==============
 def main():
@@ -567,26 +590,31 @@ def main():
         else:
             st.info("No GasBuddy data available")
 
-    # AAA MTD
+    # AAA (Last 30 Days)
     with c2:
-        st.subheader("AAA Daily Gas Prices")
+        st.subheader("AAA Daily Gas Prices (Last 30 Days)")
         aaa = historical_data[historical_data['source']=='aaa_gas_prices'].copy()
         if not aaa.empty:
             aaa['scraped_at'] = to_est(aaa['scraped_at'])
-            today_dt = datetime.now()
-            month_start = today_dt.replace(day=1).date()
-            aaa['date'] = (aaa['scraped_at'] - timedelta(days=1)).dt.date
-            aaa_mtd = aaa[(aaa['date']>=month_start) & (aaa['date']<=today_dt.date())].sort_values('scraped_at')
+            # AAA is "as-of yesterday": align to as_of_date
+            aaa['as_of_date'] = (aaa['scraped_at'] - pd.Timedelta(days=1)).dt.date
+            end_date = datetime.now(tz=ZoneInfo("America/New_York")).date()
+            start_date = end_date - timedelta(days=30)
+            aaa_30 = (aaa[(aaa['as_of_date']>=start_date) & (aaa['as_of_date']<=end_date)]
+                        .sort_values('scraped_at'))
             fig_aaa = go.Figure()
-            fig_aaa.add_trace(go.Scatter(x=aaa_mtd['scraped_at'], y=aaa_mtd['price'],
+            fig_aaa.add_trace(go.Scatter(
+                x=aaa_30['as_of_date'], y=aaa_30['price'],
                                          mode='lines+markers', name='AAA',
-                                         hovertemplate='Date (EST)=%{x}<br>AAA=$%{y:.3f}<extra></extra>'))
-            if len(aaa_mtd) > 0:
+                hovertemplate='As-of=%{x}<br>AAA=$%{y:.3f}<extra></extra>'
+            ))
+            if len(aaa_30):
                 fig_aaa.add_annotation(x=1, y=1, xref="paper", yref="paper",
                                        xanchor="right", yanchor="top", showarrow=False,
-                                       text=f"<b>${aaa_mtd['price'].iloc[-1]:.3f}</b>")
-            fig_aaa.update_layout(xaxis_title="Date (EST)", yaxis_title="Price ($/gal)", height=340,
-                                   margin=dict(l=40,r=20,t=40,b=40), hovermode='x unified',
+                                       text=f"<b>${aaa_30['price'].iloc[-1]:.3f}</b>")
+            fig_aaa.update_layout(xaxis_title="As-of Date (ET)", yaxis_title="Price ($/gal)",
+                                  height=340, margin=dict(l=40,r=20,t=40,b=40),
+                                  hovermode='x unified',
                                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1))
             st.plotly_chart(fig_aaa, use_container_width=True)
         else:
@@ -649,19 +677,24 @@ def main():
                          use_container_width=True, hide_index=True)
 
     # -------- Futures last 7 days + quick status table (kept) --------
-    st.subheader("Futures (Last 7 Days)")
+    st.subheader("Futures (Last 30 Days)")
     f1, f2 = st.columns(2)
-    cutoff = datetime.now(tz=ZoneInfo("America/New_York")) - timedelta(days=7)
+    cutoff30 = datetime.now(tz=ZoneInfo("America/New_York")) - timedelta(days=30)
 
     with f1:
         rb = historical_data[historical_data['source']=='marketwatch_rbob_futures'].copy()
         if not rb.empty:
             rb['scraped_at'] = to_est(rb['scraped_at'])
-            rb7 = rb[rb['scraped_at']>=cutoff]
+            rb30 = (rb[rb['scraped_at'] >= cutoff30]
+                      .set_index('scraped_at')
+                      .resample('D')['price'].mean()
+                      .reset_index())
             fig_rb = go.Figure()
-            fig_rb.add_trace(go.Scatter(x=rb7['scraped_at'], y=rb7['price'],
-                                        mode='lines+markers', name='RBOB'))
-            fig_rb.update_layout(title="RBOB Futures – 7D", xaxis_title="Time (EST)", yaxis_title="Price",
+            fig_rb.add_trace(go.Scatter(x=rb30['scraped_at'], y=rb30['price'],
+                                        mode='lines+markers', name='RBOB (D-avg)',
+                                        connectgaps=True))
+            fig_rb.update_layout(title="RBOB Futures – Last 30 Days",
+                                 xaxis_title="Date (ET)", yaxis_title="Price ($/gal)",
                                  height=320, margin=dict(l=40,r=20,t=40,b=40), hovermode='x unified')
             st.plotly_chart(fig_rb, use_container_width=True)
         else:
@@ -671,11 +704,16 @@ def main():
         wt = historical_data[historical_data['source']=='marketwatch_wti_futures'].copy()
         if not wt.empty:
             wt['scraped_at'] = to_est(wt['scraped_at'])
-            wt7 = wt[wt['scraped_at']>=cutoff]
+            wt30 = (wt[wt['scraped_at'] >= cutoff30]
+                      .set_index('scraped_at')
+                      .resample('D')['price'].mean()
+                      .reset_index())
             fig_wt = go.Figure()
-            fig_wt.add_trace(go.Scatter(x=wt7['scraped_at'], y=wt7['price'],
-                                        mode='lines+markers', name='WTI'))
-            fig_wt.update_layout(title="WTI Futures – 7D", xaxis_title="Time (EST)", yaxis_title="Price",
+            fig_wt.add_trace(go.Scatter(x=wt30['scraped_at'], y=wt30['price'],
+                                        mode='lines+markers', name='WTI (D-avg)',
+                                        connectgaps=True))
+            fig_wt.update_layout(title="WTI Futures – Last 30 Days",
+                                 xaxis_title="Date (ET)", yaxis_title="Price ($/bbl)",
                                  height=320, margin=dict(l=40,r=20,t=40,b=40), hovermode='x unified')
             st.plotly_chart(fig_wt, use_container_width=True)
         else:
@@ -716,12 +754,6 @@ def main():
         rows.append({"Description": desc, "Last Value": lv, "Timestamp": ts_str})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    # >>> ADD: Simple Beta 7-Day view (actuals vs forecast)
-    st.markdown("### Simple Beta Model (RBOB & WTI as drivers)")
-    st.caption("Uses AAA 'as-of-yesterday' for actuals (falls back to GasBuddy), "
-               "and a levels-with-lag OLS on RB*42 and WTI with k=7 days.")
-
-    _render_simple_beta_block(historical_data, k=7, lookback_days=120)
 
     # ============== Gas Price Forecasting & Modeling ==============
     st.markdown("---")
@@ -739,34 +771,17 @@ def main():
         val = float(gb_last.sort_values("scraped_at").iloc[-1]["price"]) if not gb_last.empty else np.nan
         st.metric("Current daily retail (GasBuddy, latest scrape)", value=("—" if pd.isna(val) else f"${val:.3f}"))
 
-    # Fit simple beta with EIA and compute next Sunday forecast
-    res = _simple_beta_fit_predict_with_eia(historical_data, k=7, lookback_days=120)
+    # Fit new AAA nowcast model
+    res = fit_aaa_nowcast_and_week(historical_data, k_lag=7, lookback_days=180, half_life_days=90, gate_tol=0.03)
     if "error" in res:
-        st.warning("Not enough data to fit the simple model yet.")
+        st.warning(res["error"])
         return
 
-    # Find next Sunday and its point forecast
-    next_sun = _next_sunday(res["base_df"]["date"].max())
-    pred_map = {d: p for d, p in zip(res["future_dates"], res["preds"])}
-    if next_sun in pred_map:
-        next_sun_pred = float(pred_map[next_sun])
-    else:
-        # fallback compute using last known RB/WTI at lag 7
-        params = res["params"]
-        ref = next_sun - pd.Timedelta(days=7)
-        row = res["base_df"].loc[res["base_df"]["date"]==ref, ["rbob","wti"]]
-        if row.empty:
-            # Get the last available values, with fallback to 0 if no data
-            rb_data = res["base_df"]["rbob"].dropna()
-            wt_data = res["base_df"]["wti"].dropna()
-            rb = float(rb_data.iloc[-1]) if len(rb_data) > 0 else 0.0
-            wt = float(wt_data.iloc[-1]) if len(wt_data) > 0 else 0.0
-        else:
-            rb = float(row["rbob"].iloc[0]); wt = float(row["wti"].iloc[0])
-        next_sun_pred = float(params["alpha"] + params["b1"]*(rb*42.0) + params["b2"]*wt)
+    next_sun = res["next_sunday"].date()
+    next_sun_pred = res["next_sunday_point"]
 
     # Residuals for uncertainty (for probability calc)
-    resid = res["eom_samples"] - np.mean(res["eom_samples"])  # Use the residuals from the model
+    resid = res["resid"]
 
     # Prev AAA Sunday default (as-of Sunday; scraped Monday)
     default_prev_sun_val, default_prev_sun_date = _prev_aaa_sunday_default(historical_data)
@@ -776,7 +791,7 @@ def main():
     left, right = st.columns([1,2])
 
     with left:
-        init_val = float(default_prev_sun_val) if np.isfinite(default_prev_sun_val) else float(res["base_df"]["gas_price"].iloc[-1])
+        init_val = float(default_prev_sun_val) if np.isfinite(default_prev_sun_val) else float(res["base"]["AAA"].iloc[-1])
         prev_sun_val = st.number_input(
             "Previous AAA Sunday value ($/gal)",
             min_value=0.000, max_value=10.000, value=round(init_val,3), step=0.001, format="%.3f",
@@ -809,7 +824,95 @@ def main():
     with k4:
         st.metric("Predicted next Sunday (AAA)", value=f"${next_sun_pred:.3f}")
 
-    # (Fan chart and all advanced-model code removed)
+    # === AAA: Last 14 vs Next 7 (Forecast) ===
+    st.subheader("AAA: Last 14 vs Next 7 (Forecast)")
+
+    base_sorted = res["base"].sort_values("date")
+    hist14 = (base_sorted.dropna(subset=["aaa"])
+              .tail(14)[["date","aaa"]]
+              .rename(columns={"aaa":"AAA"}))
+    hist14["date"] = pd.to_datetime(hist14["date"]).dt.tz_localize(None)
+
+    fdates = pd.to_datetime(res["future_dates"]).tz_localize(None)
+    preds  = res["preds"].astype(float)
+
+    fig7 = go.Figure()
+    fig7.add_trace(go.Scatter(
+        x=hist14["date"], y=hist14["AAA"],
+        mode="lines+markers", name="AAA (last 14)",
+        hovertemplate="Date=%{x|%Y-%m-%d}<br>AAA=$%{y:.3f}<extra></extra>"
+    ))
+    fig7.add_trace(go.Scatter(
+        x=fdates, y=preds,
+        mode="lines+markers+text", name="Forecast (next 7)",
+        text=[f"${v:.3f}" for v in preds], textposition="top center",
+        hovertemplate="Date=%{x|%Y-%m-%d}<br>Forecast=$%{y:.3f}<extra></extra>"
+    ))
+
+    # Line of best fit over last 14 actuals (OLS)
+    if len(hist14) >= 3:
+        xnum = hist14["date"].map(pd.Timestamp.toordinal).values.astype(float)
+        m, b = np.polyfit(xnum, hist14["AAA"].values.astype(float), 1)
+        xfit = pd.date_range(hist14["date"].min(), hist14["date"].max(), freq="D")
+        yfit = m * xfit.map(pd.Timestamp.toordinal).values.astype(float) + b
+        fig7.add_trace(go.Scatter(
+            x=xfit, y=yfit, name="Trend (14d OLS)",
+            mode="lines", line=dict(dash="dot")
+        ))
+
+    # vline at last true AAA
+    x_last = hist14["date"].max()
+    fig7.add_vline(x=x_last, line_dash="dash", line_color="gray")
+    fig7.add_annotation(x=x_last, xref="x", y=1.02, yref="paper",
+                        text="Last actual (AAA)", showarrow=False, xanchor="left")
+
+    fig7.update_layout(
+        xaxis_title="Date (ET)", yaxis_title="Price ($/gal)",
+        height=360, margin=dict(l=40, r=20, t=40, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode="x unified"
+    )
+    st.plotly_chart(fig7, use_container_width=True)
+
+    # === AAA Month-End Thresholds (from AAA model) ===
+    st.markdown("##### Month-End Thresholds (AAA model)")
+    if isinstance(res.get("eom_samples"), np.ndarray) and res["eom_samples"].size:
+        center = float(res.get("eom_point", np.nan))
+        prob_df = _make_threshold_table(res["eom_samples"], center)
+        st.caption(f"Mean EOM AAA: ${np.mean(res['eom_samples']):.3f} • 90% CI [{np.percentile(res['eom_samples'],5):.3f}, {np.percentile(res['eom_samples'],95):.3f}]")
+        st.dataframe(prob_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("EOM is out of the 7+ day window or insufficient uncertainty samples.")
+
+    # === AAA Daily Move Sigma Table (full history) ===
+    st.markdown("##### AAA Daily Move Distribution (σ buckets)")
+    aaa_hist = historical_data[historical_data["source"]=="aaa_gas_prices"].copy()
+    if aaa_hist.empty:
+        st.info("No AAA history available for σ table.")
+    else:
+        aaa_hist["scraped_at"] = to_est(aaa_hist["scraped_at"]) 
+        aaa_hist["as_of_date"] = (aaa_hist["scraped_at"] - pd.Timedelta(days=1)).dt.date
+        daily = (aaa_hist.groupby("as_of_date", as_index=False)["price"].mean()
+                          .sort_values("as_of_date"))
+        daily["diff"] = daily["price"].diff()
+        sigma = float(daily["diff"].std(skipna=True))
+        last_val = float(daily["price"].iloc[-1]) if len(daily) else np.nan
+
+        rows = []
+        for ksig in [3, 2, 1, 0]:
+            thresh = (ksig * sigma) if np.isfinite(sigma) else np.nan
+            abs_move = abs(thresh) if np.isfinite(thresh) else np.nan
+            occ = (int((daily["diff"].abs() >= (ksig*sigma)).sum())
+                   if ksig > 0 and np.isfinite(sigma)
+                   else int(daily["diff"].dropna().shape[0]))
+            rows.append({
+                "Std Dev (kσ)": f"{ksig}σ",
+                "Abs Move ($)": f"{abs_move:.3f}" if np.isfinite(abs_move) else "—",
+                "+ Impact ($)": f"{(last_val + thresh):.3f}" if np.isfinite(thresh) and np.isfinite(last_val) else "—",
+                "- Impact ($)": f"{(last_val - thresh):.3f}" if np.isfinite(thresh) and np.isfinite(last_val) else "—",
+                "Occurrences ≥ kσ": occ
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     
     # Footer
     st.markdown("---")
